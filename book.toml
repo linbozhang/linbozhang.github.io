@@ -1,0 +1,11 @@
+[book]
+title = "linbozhang's HomePage"
+authors = ["linbozhang"]
+language = "zh-CN"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+git-repository-url = "https://github.com/linbozhang/linbozhang.github.io"
