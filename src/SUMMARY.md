@@ -5,15 +5,19 @@
 ---
 
 * [编程语言](lang/README.md)
-  * [Rust](lang/rust.md)
-  * [C++](lang/cpp.md)
-  * [C#](lang/csharp.md)
+  * [Rust](lang/rust/README.md)
+  * [C++](lang/cpp/README.md)
+  * [C#](lang/csharp/README.md)
 
 * [游戏引擎](engine/README.md)
-  * [Unity](engine/unity.md)
-  * [Unreal Engine](engine/unreal.md)
-  * [Bevy](engine/bevy.md)
+  * [Unity](engine/unity/README.md)
+    * [Shader](engine/unity/shader/README.md)
+      * [卡通着色](engine/unity/shader/toon.md)
+    * [编辑器工具](engine/unity/editor-tools.md)
+  * [Unreal Engine](engine/unreal/README.md)
+  * [Bevy](engine/bevy/README.md)
 
 * [AI](ai/README.md)
-  * [代码生成](ai/coding.md)
+  * [代码生成](ai/coding/README.md)
+    * [Cursor 使用指南](ai/coding/cursor-guide.md)
   * [内容生成](ai/content.md)

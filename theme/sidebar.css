@@ -1,0 +1,23 @@
+/* 侧边栏：限制高度并可滚动，避免目录过长占满屏 */
+.sidebar .sidebar-scrollbox,
+.sidebar mdbook-sidebar-scrollbox {
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.sidebar .sidebar-scrollbox::-webkit-scrollbar,
+.sidebar mdbook-sidebar-scrollbox::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar .sidebar-scrollbox::-webkit-scrollbar-thumb,
+.sidebar mdbook-sidebar-scrollbox::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.sidebar .sidebar-scrollbox::-webkit-scrollbar-thumb:hover,
+.sidebar mdbook-sidebar-scrollbox::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}

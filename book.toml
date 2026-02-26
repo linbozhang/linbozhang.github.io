@@ -8,4 +8,7 @@ build-dir = "book"
 
 [output.html]
 default-theme = "light"
+no-section-label = true
 git-repository-url = "https://github.com/linbozhang/linbozhang.github.io"
+additional-css = ["theme/sidebar.css"]
+additional-js = ["theme/sidebar.js"]
