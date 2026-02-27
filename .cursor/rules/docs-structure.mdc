@@ -1,0 +1,12 @@
+---
+description: 个人文档库 src 下 Markdown 与 SUMMARY 的规范
+globs: src/**/*.md
+alwaysApply: false
+---
+
+# 文档库结构约定
+
+- 正文仅在 `src/` 下；侧栏目录唯一来源是 `src/SUMMARY.md`。
+- 新增/移动/删除文档后必须同步修改 SUMMARY；路径相对于 `src/`，子项比父项多 2 空格缩进。
+- 文件名：小写英文与连字符（如 `cursor-guide.md`）；分类入口用目录 + `README.md`。子分类目录下除 README 外可有独立 `.md` 文档。
+- 详细模板与流程见项目 Skill：`.cursor/skills/doc-library/`（含 template.md 与 SKILL.md）。
