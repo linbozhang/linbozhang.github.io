@@ -17,7 +17,7 @@ description: Adds or organizes documents in this mdBook personal doc library acc
 
 ### 1. 确定归属与路径
 
-- **顶层只能属于其一**：编程语言 → `src/lang/`；游戏引擎 → `src/engine/`；AI → `src/ai/`。
+- **顶层只能属于其一**：编程语言 → `src/lang/`；游戏引擎 → `src/engine/`；AI → `src/ai/`；站点 → `src/site/`（本站搭建、mdBook 扩展与配置等）。
 - 若归属已有子目录（如 `lang/rust/`、`engine/unity/shader/`），新文档放在对应目录下。
 - 若需**新建子分类**：新建目录并在其下建 `README.md` 作为入口。
 

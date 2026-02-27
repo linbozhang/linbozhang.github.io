@@ -22,5 +22,8 @@
   * [代码生成](ai/coding/README.md)
     * [Cursor 使用指南](ai/coding/cursor-guide.md)
   * [内容生成](ai/content/README.md)
-    * [文档库配置](ai/content/doc-setup/README.md)
-    * [Cursor 规则与 Skill 搭建过程](ai/content/doc-setup/cursor-rules-and-skills.md)
+
+* [站点](site/README.md)
+  * [文档库配置](site/doc-setup/README.md)
+    * [Cursor 规则与 Skill 搭建过程](site/doc-setup/cursor-rules-and-skills.md)
+    * [自定义侧边栏：折叠与滚动](site/doc-setup/custom-sidebar.md)

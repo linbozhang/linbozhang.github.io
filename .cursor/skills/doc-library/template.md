@@ -6,11 +6,12 @@
 
 ## 1. 目录与路径规范
 
-### 1.1 顶层分类（不可改）
+### 1.1 顶层分类
 
 - **编程语言** → `src/lang/`（Rust / C++ / C# 等各占子目录）
 - **游戏引擎** → `src/engine/`（Unity / Unreal / Bevy 等各占子目录）
 - **AI** → `src/ai/`（代码生成、内容生成等）
+- **站点** → `src/site/`（本站搭建、mdBook 扩展、主题与配置等；可按需新增顶层分类）
 
 ### 1.2 路径规则
 
@@ -54,6 +55,11 @@ src/
 │   │   └── cursor-guide.md
 │   └── content/
 │       └── README.md
+├── site/
+│   ├── README.md        # 站点入口（搭建、扩展、配置等）
+│   └── doc-setup/
+│       ├── README.md
+│       └── custom-sidebar.md
 ├── README.md            # 站点首页（简介）
 └── SUMMARY.md           # 侧栏目录，唯一来源
 ```
@@ -90,6 +96,8 @@ src/
 * [AI](ai/README.md)
   * [代码生成](ai/coding/README.md)
   * [内容生成](ai/content/README.md)
+* [站点](site/README.md)
+  * [文档库配置](site/doc-setup/README.md)
 ```
 
 ---
