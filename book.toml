@@ -8,9 +8,10 @@ build-dir = "book"
 
 [output.html]
 default-theme = "light"
+# 侧栏目录里不会出现 1.、2.1.1 这样的编号； 正文里的标题也不会带编号。
 no-section-label = true
 # 侧栏不展开当前文档的大纲（不显示「本页」标题导航）
 sidebar-header-nav = false
 git-repository-url = "https://github.com/linbozhang/linbozhang.github.io"
-additional-css = ["theme/sidebar.css"]
-additional-js = ["theme/sidebar.js"]
+# additional-css = ["theme/sidebar.css"]
+# additional-js = ["theme/sidebar.js"]
