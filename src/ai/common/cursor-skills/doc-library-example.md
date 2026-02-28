@@ -83,7 +83,9 @@ description: Adds or organizes documents in this mdBook personal doc library acc
 
 ## template.md 完整代码
 
-```markdown
+在 Markdown 中展示「代码里还有代码块」时，外层需用**更多反引号**做围栏（如 4 个），内层用 3 个，这样内层的 ``` 不会提前结束外层块。下面用 ````markdown` 与 ```` 包裹整段 template 内容。
+
+````markdown
 # 个人文档库 — 文档模板与规范
 
 本仓库为 mdBook 个人文档库，所有正文在 `src/` 下，目录由 `src/SUMMARY.md` 定义。
@@ -239,7 +241,7 @@ src/
 - **标题**：可与文件名不同，用中文或英文，在 SUMMARY 和页面 `# 标题` 中保持一致。
 - **正文**：默认中文；技术术语、代码、命令不翻译。
 - 不在 `src/` 下放与 mdBook 无关的二进制或脚本；资源可放 `src/` 下子目录或项目根下单独目录（若需再约定）。
-```
+````
 
 ---
 
