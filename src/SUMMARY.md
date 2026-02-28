@@ -22,6 +22,10 @@
   * [代码生成](ai/coding/README.md)
     * [Cursor 使用指南](ai/coding/cursor-guide.md)
   * [内容生成](ai/content/README.md)
+  * [通用](ai/common/README.md)
+    * [Cursor Rule 配置指南](ai/common/cursor-rules/cursor-rule-config-guide.md)
+    * [Ask Chain 规则](ai/common/cursor-rules/ask-chain-rule.md)
+    * [文档库结构规则](ai/common/cursor-rules/docs-structure-rule.md)
 
 * [站点](site/README.md)
   * [文档库配置](site/doc-setup/README.md)

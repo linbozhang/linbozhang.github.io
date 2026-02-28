@@ -1,6 +1,10 @@
 # mdBook 构建输出
 book/
 
+# MCP Server
+mcp-server/node_modules/
+mcp-server/build/
+
 # 编辑器与系统
 .DS_Store
 *.swp
