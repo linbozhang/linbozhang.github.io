@@ -13,7 +13,19 @@
 
 ## Vulkan 中的光追介绍（Introduction to ray tracing in Vulkan）
 
-硬件光追于 2018 年随 Nvidia RTX 系列首次出现。Vulkan 中最初仅通过 Nvidia 扩展支持，后由 Khronos 扩展标准化，供多厂商实现。我们单独用一章讲解光追管线搭建，因其需要光追专用的新结构。与传统管线的首要区别是：场景必须组织成**加速结构（Acceleration Structures，AS）**，以加速遍历并跳过射线不可能相交的整块 mesh。加速结构通常实现为**包围体层次（BVH）**：将场景与各 mesh 划分为包围盒并组织成树；叶节点才包含几何数据，父节点定义包含子节点的体积位置与范围。Figure 12.1 – 左：场景示例；右：其 BVH 表示（来源：Wikipedia）。Vulkan 进一步区分 **TLAS** 与 **BLAS**：BLAS 存放单个 mesh 定义，可被多次加入 TLAS，通过变换矩阵在场景中放置同一 mesh 的多个实例。Figure 12.2 – 每个 BLAS 可以不同着色与变换多次加入 TLAS（来源：Vulkan spec）。有了加速结构后，可转向**光追 pipeline**：其核心变化是 shader 内可调用其它 shader，通过 **shader binding table** 实现；表中每个槽对应一种 shader 类型：**Ray generation**：传统光追管线的入口，从此发射射线；后文也会从 fragment/compute shader 发射。**Intersection**：用于实现自定义几何图元；Vulkan 中仅支持三角形与 **AABB**。**Any-hit**：在 intersection 触发后执行，用于决定该命中是否继续处理或忽略。**Closest hit**：射线首次命中图元时触发。**Miss**：射线未命中任何图元时触发。**Callable**：可从现有 shader 内调用的 shader。流程见 Figure 12.3 – 光追管线的 shader 流程（来源：Vulkan spec）。本节概述了 Vulkan 中光追的实现方式；下一节详述如何创建加速结构。
+硬件光追于 2018 年随 Nvidia RTX 系列首次出现。Vulkan 中最初仅通过 Nvidia 扩展支持，后由 Khronos 扩展标准化，供多厂商实现。我们单独用一章讲解光追管线搭建，因其需要光追专用的新结构。与传统管线的首要区别是：场景必须组织成**加速结构（Acceleration Structures，AS）**，以加速遍历并跳过射线不可能相交的整块 mesh。加速结构通常实现为**包围体层次（BVH）**：将场景与各 mesh 划分为包围盒并组织成树；叶节点才包含几何数据，父节点定义包含子节点的体积位置与范围。
+
+![image-20260303202924806](./image-20260303202924806.png)
+
+Figure 12.1 – 左：场景示例；右：其 BVH 表示（来源：Wikipedia）。Vulkan 进一步区分 **TLAS** 与 **BLAS**：BLAS 存放单个 mesh 定义，可被多次加入 TLAS，通过变换矩阵在场景中放置同一 mesh 的多个实例。
+
+![image-20260303202930794](./image-20260303202930794.png)
+
+Figure 12.2 – 每个 BLAS 可以不同着色与变换多次加入 TLAS（来源：Vulkan spec）。有了加速结构后，可转向**光追 pipeline**：其核心变化是 shader 内可调用其它 shader，通过 **shader binding table** 实现；表中每个槽对应一种 shader 类型：**Ray generation**：传统光追管线的入口，从此发射射线；后文也会从 fragment/compute shader 发射。**Intersection**：用于实现自定义几何图元；Vulkan 中仅支持三角形与 **AABB**。**Any-hit**：在 intersection 触发后执行，用于决定该命中是否继续处理或忽略。**Closest hit**：射线首次命中图元时触发。**Miss**：射线未命中任何图元时触发。**Callable**：可从现有 shader 内调用的 shader。流程见
+
+![image-20260303202939084](./image-20260303202939084.png)
+
+ Figure 12.3 – 光追管线的 shader 流程（来源：Vulkan spec）。本节概述了 Vulkan 中光追的实现方式；下一节详述如何创建加速结构。
 
 ## 构建 BLAS 与 TLAS（Building the BLAS and TLAS）
 
@@ -183,7 +195,11 @@ vk_command_buffer, 1, &as_info, tlas_ranges );
 
 ## 定义与创建光追 pipeline（Defining and creating a ray tracing pipeline）
 
-有了加速结构后，可着手光追 pipeline。如前所述，光追 shader 与传统图形/compute shader 不同，按 shader binding table 的配置调用其它 shader。熟悉 C++ 可将其理解为一种多态：光追管线的接口固定，运行时动态决定调用哪些 shader（方法）。不必定义所有入口；本例仅定义 ray generation、closest hit 与 miss shader，暂不实现 any-hit 与 intersection。Shader binding table 可表示为表格，示例中我们将构建如下表格：表中**顺序**重要，驱动按触发阶段据此决定调用哪个 shader。在构建 pipeline 前，先看将用到的三个示例 shader。从 **ray generation shader** 开始，负责发射遍历场景的射线。先启用 GLSL 光追扩展：
+有了加速结构后，可着手光追 pipeline。如前所述，光追 shader 与传统图形/compute shader 不同，按 shader binding table 的配置调用其它 shader。熟悉 C++ 可将其理解为一种多态：光追管线的接口固定，运行时动态决定调用哪些 shader（方法）。不必定义所有入口；本例仅定义 ray generation、closest hit 与 miss shader，暂不实现 any-hit 与 intersection。Shader binding table 可表示为表格，示例中我们将构建如下表格：
+
+![image-20260303203026555](./image-20260303203026555.png)
+
+表中**顺序**重要，驱动按触发阶段据此决定调用哪个 shader。在构建 pipeline 前，先看将用到的三个示例 shader。从 **ray generation shader** 开始，负责发射遍历场景的射线。先启用 GLSL 光追扩展：
 #extension GL_EXT_ray_tracing : enable
 接着定义由其它 shader 写入的变量：`layout( location = 0 ) rayPayloadEXT vec4 payload;`。再定义指向 AS 的 uniform：`layout( binding = 1, set = MATERIAL_SET ) uniform accelerationStructureEXT as;`。最后定义 ray generation 调用的参数（rayParams）：`sbt_offset` 为 shader binding table 的偏移，同类型有多个 shader 时使用；本例每类仅一条，为 0。`sbt_stride` 为表中每条目大小，需通过 `VkPhysicalDeviceRayTracingPipelinePropertiesKHR` 传给 `vkGetPhysicalDeviceProperties2` 查询。`miss_index` 用于计算 miss shader 索引，表中有多个 miss 时使用；本例为 0。`out_image_index` 为 bindless 图像数组中要写入的图像索引。定义好 ray generation 的输入输出后，即可调用函数向场景发射射线：
 traceRayEXT( as, // top level acceleration structure

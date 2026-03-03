@@ -108,6 +108,8 @@ vec2( -1, -1 );
 
 下图展示了该计算的结果：
 
+![image-20260303203057919](./image-20260303203057919.png)
+
 Figure 13.1 – The motion vector's texture
 
 该值将存入纹理供后续使用。下一步是计算过去四帧的可见性变化。
@@ -138,6 +140,8 @@ float delta = max_v - min_v;
 ```
 
 首帧时历史值设为 0。将 delta 存入另一个 3D 纹理供下一 pass 使用。下图为本 pass 的结果：
+
+![image-20260303203107428](./image-20260303203107428.png)
 
 Figure 13.2 – The visibility variation for the past four frames
 
@@ -256,6 +260,8 @@ sample_count = 1;
 ```
 
 下图是采样数缓存纹理的示例：
+
+![image-20260303203121377](./image-20260303203121377.png)
 
 Figure 13.3 – The sample count cache texture
 
@@ -444,6 +450,8 @@ spatial_filtered_value += v * k;
 ```
 
 下图是滤波后可见性纹理的内容：
+
+![image-20260303203133856](./image-20260303203133856.png)
 
 Figure 13.4 – The filtered visibility texture
 

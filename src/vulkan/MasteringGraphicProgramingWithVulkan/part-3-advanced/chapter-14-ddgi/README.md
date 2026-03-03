@@ -16,6 +16,8 @@
 
 下图展示了本章代码对间接光照的贡献：
 
+![image-20260303203149607](./image-20260303203149607.png)
+
 Figure 14.1 – Indirect lighting output
 
 在图 14.1 中，场景左侧有一个点光源。可以看到光源的绿色从左侧窗帘反射到地板和右侧柱体、窗帘上；远处地板上能看到天空颜色对墙面的影响，拱门因其可见性带来的遮挡而只受到很少的光照。
@@ -32,6 +34,8 @@ Figure 14.1 – Indirect lighting output
 
 下图表示直接光照：
 
+![image-20260303203202960](./image-20260303203202960.png)
+
 Figure 14.2 – Direct lighting
 
 图 14.2 描述了当前的光照设置：发光光线与表面相交，光从这些表面反射后被相机捕获，成为像素颜色。这是对现象的极简描述，但已包含我们所需的基本要素。
@@ -39,6 +43,8 @@ Figure 14.2 – Direct lighting
 对于间接光照，仅依赖相机视角是不够的，我们还需要计算视野外、却仍能影响可见区域的光源与几何体对可见表面的贡献。在这方面，光线追踪是最合适的工具：它能在空间上查询场景，计算不同反射次数对给定片段最终颜色的贡献。
 
 下图展示间接光照：
+
+![image-20260303203208799](./image-20260303203208799.png)
 
 Figure 14.3 – Indirect lighting
 
@@ -58,6 +64,8 @@ Figure 14.3 – Indirect lighting
 DDGI 的核心思想是：用光线追踪**动态更新**探针——对每个探针发射若干光线，在三角形交点处计算辐亮度（radiance）。辐亮度由引擎中的动态光源计算，可实时响应光源与几何体的变化。
 
 相对屏幕像素，网格分辨率较低，因此只能表现漫反射光照。下图是算法概览，展示了着色器（绿色矩形）与纹理（黄色椭圆）之间的关系与顺序：
+
+![image-20260303203217109](./image-20260303203217109.png)
 
 Figure 14.4 – Algorithm overview
 
@@ -87,6 +95,8 @@ Figure 14.4 – Algorithm overview
 
 偏移计算完成后，每个探针都有最终的世界位置，可显著提升间接光照的视觉质量。下图是计算偏移前后的对比：
 
+![image-20260303203229526](./image-20260303203229526.png)
+
 Figure 14.5 – Global illumination with (left) and without (right) probe offsets
 
 可以看到，位于几何体内部的探针不仅无法贡献光照，还会产生伪影；通过探针偏移，可以把探针放到更合适的位置。
@@ -102,6 +112,8 @@ Figure 14.5 – Global illumination with (left) and without (right) probe offset
 着色器会读取新计算的辐亮度与距离，以及上一帧的辐照度与可见性纹理，对数值做混合以避免闪烁，类似体积雾（Volumetric Fog）中时间重投影的简单滞后。若光照条件剧烈变化，可动态调整滞后以抵消滞后导致的更新缓慢；代价是对光源移动的反应会变慢，这是为避免闪烁而不得不接受的。
 
 着色器最后一步是更新双线性滤波所需的边界。双线性滤波需要按特定顺序读取采样，如下图所示：
+
+![image-20260303203239214](./image-20260303203239214.png)
 
 Figure 14.6 – Bilinear filtering samples. The outer grid copies pixels from the written pixel positions inside each rectangle
 

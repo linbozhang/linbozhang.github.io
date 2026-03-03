@@ -84,6 +84,8 @@ vec3 reflected_ray = normalize( reflect( incoming, normal ) );
 
 使用该方法得到的效果如下：
 
+![image-20260303203322660](./image-20260303203322660.png)
+
 Figure 15.1 – Mirror-like reflections
 
 第二种通过随机采样 GGX 分布计算法线：
@@ -193,6 +195,8 @@ break;
 ```
 
 选中光源后，向该光源发射光线判断是否可见；若可见，则用光照模型计算反射表面的最终颜色。阴影因子按第 13 章《用光线追踪重新实现阴影》的方式计算，颜色计算与第 14 章《用光线追踪实现动态漫反射全局光照》相同。结果如下：
+
+![image-20260303203333588](./image-20260303203333588.png)
 
 Figure 15.2 – The noisy output of the ray tracing step
 
@@ -310,6 +314,8 @@ integrated_moments_out = moments;
 ```
 
 累积 pass 到此结束。得到的效果如下：
+
+![image-20260303203345887](./image-20260303203345887.png)
 
 Figure 15.3 – The color output after the accumulation step
 
@@ -430,6 +436,8 @@ return w_z * w_n * w_l;
 ```
 
 至此完成了 SVGF 的实现。五遍滤波后得到：
+
+![image-20260303203359079](./image-20260303203359079.png)
 
 Figure 15.4 – The output at the end of the denoising step
 
