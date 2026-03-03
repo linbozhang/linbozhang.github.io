@@ -29,14 +29,34 @@ Figure 10.1 – 带密度体积与三盏投射阴影光源的体积雾。
 
 Figure 10.2 – 光在参与介质中的行为。我们要描述的是光穿过参与介质（雾体积、云或大气散射）时的变化。主要有三种现象：**吸收（Absorption）**：光被介质吸收、不再射出，净能量损失。**外散射（Out-scattering）**：Figure 10.2 中绿色箭头所示，同样是能量离开介质（从而可见）的损失。**内散射（In-scattering）**：来自光源、与介质相互作用后进入的光能。除这三者外，要完整理解体积渲染还需掌握另外三个概念。
 
-**相位函数（Phase function）**：描述光向不同方向的散射，依赖于光向量与出射方向的夹角。可很复杂以追求真实感，最常用的是 **Henyey-Greenstein** 函数，考虑各向异性。公式见 Figure 10.3 – The Henyey-Greenstein function。式中 theta 为视线向量与光向量的夹角；shader 中会给出可用的实现。
+**相位函数（Phase function）**：描述光向不同方向的散射，依赖于光向量与出射方向的夹角。可很复杂以追求真实感，最常用的是 **Henyey-Greenstein** 函数，考虑各向异性。公式见 
+
+![image-20260303200809560](./image-20260303200809560.png)
+
+Figure 10.3 – The Henyey-Greenstein function。式中 theta 为视线向量与光向量的夹角；shader 中会给出可用的实现。
 
 **消光（Extinction）**：描述光被散射程度的量，在算法中间步骤使用；最终应用到场景时则需要**透射率**。
 
-**透射率（Transmittance）**：光穿过一段介质的消光结果，由 **Beer-Lambert 定律**计算，Figure 10.4 – The Beer-Lambert law。在最终积分步骤中会计算透射率并据此将雾应用到场景；此处先建立概念，章末会提供链接以深入数学背景。有了这些概念即可进入体积雾的实现细节。
+**透射率（Transmittance）**：光穿过一段介质的消光结果，由 **Beer-Lambert 定律**计算，
+
+![image-20260303200822158](./image-20260303200822158.png)
+
+Figure 10.4 – The Beer-Lambert law。在最终积分步骤中会计算透射率并据此将雾应用到场景；此处先建立概念，章末会提供链接以深入数学背景。有了这些概念即可进入体积雾的实现细节。
 
 ### 体积雾（Volumetric Fog）
-了解体积渲染的各个组成部分后，可以从整体看算法。Bart Wronski 开发该技术时最早、最巧妙的思路之一是使用**视锥对齐体积纹理（Frustum Aligned Volume Texture）**，如图 10.5。Figure 10.5 – Frustum Aligned Volume Texture。结合标准光栅化相关的数学，可以在相机视锥与纹理之间建立映射；这种映射在渲染各阶段本就存在（例如顶点乘 view-projection 矩阵）。新的是在体积纹理中存储信息以计算体积渲染；纹理的每个元素常称为 **froxel**（frustum voxel，视锥体素）。我们选择 128×128×128 的纹理，也有方案让宽高依赖屏幕分辨率（类似聚类着色）。会以该分辨率使用多张纹理作为中间结果，滤波稍后讨论。另一项选择是用**非线性深度分布**将线性范围映射到指数范围，以提高相机方向上的有效分辨率，采用类似 id Tech 的分布函数，Figure 10.6 – Volume texture depth slice on the Z coordinate function。确定体积纹理与世界单位的映射后，可以描述完整体积雾方案的步骤。算法概览如下，矩形表示 shader 执行、椭圆表示纹理。Figure 10.7 – Algorithm overview。下面按步骤建立概念模型，shader 细节稍后在章内展开。
+了解体积渲染的各个组成部分后，可以从整体看算法。Bart Wronski 开发该技术时最早、最巧妙的思路之一是使用**视锥对齐体积纹理（Frustum Aligned Volume Texture）**，如图 10.5。
+
+![image-20260303200829335](./image-20260303200829335.png)
+
+Figure 10.5 – Frustum Aligned Volume Texture。结合标准光栅化相关的数学，可以在相机视锥与纹理之间建立映射；这种映射在渲染各阶段本就存在（例如顶点乘 view-projection 矩阵）。新的是在体积纹理中存储信息以计算体积渲染；纹理的每个元素常称为 **froxel**（frustum voxel，视锥体素）。我们选择 128×128×128 的纹理，也有方案让宽高依赖屏幕分辨率（类似聚类着色）。会以该分辨率使用多张纹理作为中间结果，滤波稍后讨论。另一项选择是用**非线性深度分布**将线性范围映射到指数范围，以提高相机方向上的有效分辨率，采用类似 id Tech 的分布函数，
+
+![image-20260303200837346](./image-20260303200837346.png)
+
+Figure 10.6 – Volume texture depth slice on the Z coordinate function。确定体积纹理与世界单位的映射后，可以描述完整体积雾方案的步骤。算法概览如下，矩形表示 shader 执行、椭圆表示纹理。
+
+![image-20260303200850873](./image-20260303200850873.png)
+
+Figure 10.7 – Algorithm overview。下面按步骤建立概念模型，shader 细节稍后在章内展开。
 
 **数据注入（Data injection）**：第一步是数据注入。该 shader 将带颜色与密度的雾写入第一张仅含数据的视锥对齐纹理。我们加入了恒定雾、基于高度的雾以及雾体积，以模拟更真实的游戏开发设置。
 

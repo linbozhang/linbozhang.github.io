@@ -1,161 +1,130 @@
-Revisiting Shadows with Ray
-Tracing
-In this chapter, we are going to implement shadows using ray tracing.
-In Chapter 8, Adding Shadows Using Mesh Shaders, we used traditional
-shadow mapping techniques to get the visibility from each light and use
-that information to compute the shadow term for the final image. Using
-ray tracing for shadows allows us to get more detailed results and to
-have finer-grained control over the quality of results based on the
-distance and intensity of each light.
-We are going to implement two techniques: the first one is similar to
-the one used in offline rendering, where we shoot rays to each light to
-determine visibility. While this approach gives us the best results, it can
-be quite expensive depending on the number of lights in the scene.
-The second technique is based on a recent article from Ray Tracing
-Gems. We use some heuristics to determine how many rays we need to
-cast per light, and we combine the results with spatial and temporal
-filters to make the result stable.
-In this chapter, we’ll cover the following main topics:
-• Implementing simple ray-traced shadows
-• Implementing an advanced technique for ray-traced shadows
-Technical requirements
-By the end of this chapter you will learn how to implement basic ray-
-traced shadows. You will also become familiar with a more advanced
-technique that is capable of rendering multiple lights with soft shadows.
-The code for this chapter can be found at the following URL: https://
-github.com/PacktPublishing/Mastering-Graphics-Programming-with-
-Vulkan/tree/main/source/chapter13.
-Implementing simple ray-traced
-shadows
-As we mentioned in the introduction, shadow mapping techniques have
-been a staple of real-time rendering for many years. Before the
-introduction of ray tracing capabilities in GPUs, using other techniques
-was simply too expensive.
-This hasn’t prevented the graphics community from coming up with
-clever solutions to increase the quality of results while maintaining a
-low cost. The main issue with traditional techniques is that they are
-based on capturing depth buffers from the point of view of each light.
-This works well for objects that are near the light and camera, but as we
-move further away, depth discontinuities lead to artefacts in the final
-result.
-Solutions to this problem include filtering the result – for instance,
-using Percentage Closer Filtering (PCF) or Cascade Shadow Maps
-(CSM). This technique requires capturing multiple depth slices – the
-cascades to maintain enough resolution as we move further away from
-the light. This is usually employed only for sunlight, as it can require a
-lot of memory and time to re-render the scene multiple times. It can
-also be quite difficult to get good results on the boundaries between
-cascades.
-The other main issue with shadow mapping is that it can be difficult to
-get hard shadows because of the resolution of the depth buffer and the
-discontinuities it introduces. We can alleviate these issues with ray
-tracing. Offline rendering has used ray and path tracing for many years
-to achieve photo-realistic effects, including shadows.
-They, of course, have the luxury of being able to wait for hours or days
-for a single frame to complete, but we can get similar results in real
-time. In the previous chapter, we used the vkCmdTraceRaysKHR
-command to cast rays into a scene.
-For this implementation, we are introducing ray queries, which allow us
-to traverse the Acceleration Structures we set up from a fragment and
-compute shaders.
-We are going to modify the calculate_point_light_contribution method
-of our lighting pass to determine which lights each fragment can see
-and determine the final shadow term.
-First, we need to enable the VK_KHR_ray_query device extension. We
-also need to enable the related shader extension:
+# 第13章 用光线追踪重新实现阴影（Revisiting Shadows with Ray Tracing）
+
+本章我们将使用光线追踪实现阴影。
+
+在第 8 章《使用 Mesh Shader 添加阴影》中，我们使用传统的阴影贴图（shadow mapping）技术获取每个光源的可见性，并用该信息计算最终图像的阴影项。使用光线追踪做阴影能获得更精细的结果，并能根据每个光源的距离与强度对质量做更细粒度的控制。
+
+我们将实现两种技术：第一种类似离线渲染中的做法，向每个光源发射光线以判定可见性。这种方式效果最好，但随场景中光源数量增加，开销可能很大。第二种技术基于《Ray Tracing Gems》中的一篇近期文章，用一些启发式方法决定每个光源需要发射多少光线，并将结果与空间、时间滤波结合，使结果稳定。
+
+本章将涵盖以下主题：
+
+- 实现简单的光线追踪阴影
+- 实现进阶的光线追踪阴影技术
+
+## 技术需求（Technical requirements）
+
+学完本章后，你将掌握如何实现基础的光线追踪阴影，并熟悉一种能渲染多光源与软阴影的进阶技术。
+
+本章代码可在以下地址找到：https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter13。
+
+## 实现简单的光线追踪阴影（Implementing simple ray-traced shadows）
+
+如引言所述，阴影贴图技术多年来一直是实时渲染的主力。在 GPU 具备光线追踪能力之前，其他方案往往过于昂贵。
+
+图形社区并未因此停止想出各种办法，在保持低成本的同时提升质量。传统技术的主要问题在于：它们基于从每个光源视角捕获的深度缓冲。这对靠近光源和相机的物体效果不错，但距离变远时，深度不连续会在最终结果中产生伪影。
+
+解决思路包括对结果做滤波，例如使用百分比近距滤波（Percentage Closer Filtering, PCF）或级联阴影贴图（Cascade Shadow Maps, CSM）。CSM 需要捕获多个深度切片（级联），以在远离光源时保持足够分辨率，通常只用于太阳光，因为多次重绘场景会占用大量内存和时间，且级联边界处很难做好。
+
+阴影贴图的另一大问题是：由于深度缓冲分辨率和其带来的不连续，很难得到硬阴影。我们可以用光线追踪缓解这些问题。离线渲染多年来一直用光线追踪与路径追踪实现包括阴影在内的照片级效果；他们可以等一帧算几小时甚至几天，而我们可以在实时下得到类似效果。上一章中我们使用 `vkCmdTraceRaysKHR` 向场景发射光线。
+
+本节实现中我们引入**光线查询（ray queries）**，允许在片段着色器和计算着色器中遍历已构建的加速结构（Acceleration Structures）。
+
+我们将修改光照 pass 中的 `calculate_point_light_contribution` 方法，判断每个片段能看到哪些光源，并得到最终阴影项。
+
+首先需要启用设备扩展 `VK_KHR_ray_query`，以及对应的着色器扩展：
+
+```
 #extension GL_EXT_ray_query : enable
-Then, instead of computing the cube map from each light point of view,
-we simply cast a ray from the fragment world position to each light.
-We start by initializing a rayQueryEXT object:
+```
+
+然后不再从每个光源视角计算立方体贴图，而是从片段的世界空间位置向每个光源发射一条光线。先初始化一个 `rayQueryEXT` 对象：
+
+```
 rayQueryEXT rayQuery;
 rayQueryInitializeEXT(rayQuery, as, gl_RayFlagsOpaqueEXT |
 gl_RayFlagsTerminateOnFirstHitEXT, 0xff,
 world_position, 0.001, l, d);
-Notice the gl_RayFlagsTerminateOnFirstHitEXT parameter, as we are
-only interested in the first hit for this ray. l is the direction from
-world_position to the light and we use a small offset from the ray
-origin to avoid self-intersection.
-The last parameter, d, is the distance from world_position to the light
-position. It’s important to specify this value, as the ray query could
-report intersections past the light position otherwise, and we could
-incorrectly mark a fragment to be in shadow.
-Now that we have initialized the ray query object, we call the following
-method to start scene traversal:
+```
+
+注意 `gl_RayFlagsTerminateOnFirstHitEXT` 参数：我们只关心该光线的首次命中。`l` 是从 `world_position` 指向光源的方向，对射线起点做小偏移以避免自相交。最后一个参数 `d` 是 `world_position` 到光源位置的距离；必须正确设置该值，否则光线查询可能报告超过光源位置的交点，从而错误地把片段判为在阴影中。
+
+初始化光线查询对象后，调用以下方法开始场景遍历：
+
+```
 rayQueryProceedEXT( rayQuery );
-This will return either when a hit is found or when the ray terminates.
-When using ray queries, we don’t have to specify a shader binding
-table. To determine the result of ray traversal, there are several
-methods we can use to query the outcome. In our case, we only want to
-know whether the ray hit any geometry:
+```
+
+该方法会在找到命中或光线终止时返回。使用光线查询时无需指定着色器绑定表（shader binding table）。要查询遍历结果，可用多种方法；这里我们只关心光线是否击中几何体：
+
+```
 if ( rayQueryGetIntersectionTypeEXT( rayQuery, true ) ==
 gl_RayQueryCommittedIntersectionNoneEXT ) {
 shadow = 1.0;
 }
-If not, it means we can see the light we are processing from this
-fragment, and we can account for this light contribution in the final
-computation. We repeat this for each light to obtain the overall shadow
-term.
-While this implementation is really simple, it mainly works for point
-lights. For other types of light – area lights, for instance – we would
-need to cast multiple rays to determine the visibility. As the number of
-lights increases, it can become too expensive to use this simple
-technique.
-In this section, we have demonstrated a simple implementation to get
-started with real-time ray-traced shadows. In the next section, we are
-going to introduce a new technique that scales better and can support
-multiple types of light.
-Improving ray-traced shadows
-In the previous section, we described a simple algorithm that can be
-used to compute the visibility term in our scene. As we mentioned, this
-doesn’t scale well for a large number of lights and can require a large
-number of samples for different types of light.
-In this section, we are going to implement a different algorithm inspired
-by the article Ray Traced Shadows in the Ray Tracing Gems book. As will
-be common in this chapter and upcoming chapters, the main idea is to
-spread the computation cost over time.
-This can still lead to noisy results, as we are still using a low number of
-samples. To achieve the quality we are looking for, we are going to
-make use of spatial and temporal filtering, similar to what we did in
-Chapter 11, Temporal Anti-Aliasing.
-The technique is implemented over three passes, and we are also going
-to leverage motion vectors. We are now going to explain each pass in
-detail.
-Motion vectors
-As we saw in Chapter 11, Temporal Anti-Aliasing, motion vectors are
-needed to determine how far an object at a given fragment has moved
-between frames. We need this information to determine which
-information to keep and which to discard for our computation. This
-helps us avoid ghosting artifacts in the final image.
-For the technique in this chapter, we need to compute motion vectors
-differently compared to Temporal Anti-Aliasing (TAA). We first
-compute the proportional difference of depth between the two frames:
+```
+
+若未命中，表示从该片段能看到当前处理的光源，可在最终计算中计入该光源的贡献。对每个光源重复上述过程即可得到整体阴影项。
+
+该实现非常简单，主要适用于点光源。对于面光源等其他类型，需要发射多条光线才能判定可见性；光源增多时，这种简单做法会变得过于昂贵。
+
+本节演示了入门级的实时光线追踪阴影实现。下一节将介绍一种扩展性更好、能支持多种光源类型的新技术。
+
+## 改进光线追踪阴影（Improving ray-traced shadows）
+
+上一节描述了一种用于计算场景可见性项的简单算法。如前所述，它在大量光源下扩展性不好，且对不同类型的光源可能需要大量采样。
+
+本节将实现一种受《Ray Tracing Gems》中《Ray Traced Shadows》一文启发的算法。与本章及后续章节的常见思路一样，核心思想是**把计算成本分摊到时间上**。
+
+由于采样数仍然较少，结果可能带噪点。为达到目标质量，我们将使用空间与时间滤波，类似第 11 章《时间性抗锯齿（Temporal Anti-Aliasing）》中的做法。
+
+该技术由三个 pass 实现，并会利用运动向量（motion vectors）。下面逐 pass 说明。
+
+### 运动向量（Motion vectors）
+
+如第 11 章所述，运动向量用于确定给定片段处的物体在帧间移动了多少，以便决定保留或丢弃哪些历史信息，从而减少最终图像中的拖影（ghosting）。
+
+本章技术所需的运动向量与时间性抗锯齿（TAA）中的计算方式不同。先计算两帧深度的比例差：
+
+```
 float depth_diff = abs( 1.0 - ( previous_position_ndc.z /
 current_position_ndc.z ) );
-Next, we compute an epsilon value that will be used to determine
-acceptable changes in depth:
+```
+
+再计算用于判断深度变化是否可接受的 epsilon：
+
+```
 float c1 = 0.003;
 float c2 = 0.017;
 float eps = c1 + c2 * abs( view_normal.z );
-Finally, we use these two values to decide whether the reprojection was
-successful:
+```
+
+最后用这两个值决定重投影是否成功：
+
+```
 vec2 visibility_motion = depth_diff < eps ? vec2(
 current_position_ndc.xy - previous_position_ndc.xy ) :
 vec2( -1, -1 );
-The following figure shows the result of this computation:
-Figure 13.1 – The motion vector’s texture
-We are going to store this value in a texture for later use. The next step
-is to compute the variation in visibility for the past four frames.
-Computing visibility variance
-This technique uses data from the past four frames to determine how
-many samples are needed for each light for each fragment. We store the
-visibility values in a 3D RGBA16 texture, where each channel is the
-visibility value of the previous frames. Each layer stores the visibility
-history for individual lights.
-This is one of the first compute shaders where we use a 3D dispatch
-size. It’s worth highlighting the dispatch call:
+```
+
+下图展示了该计算的结果：
+
+Figure 13.1 – The motion vector's texture
+
+该值将存入纹理供后续使用。下一步是计算过去四帧的可见性变化。
+
+### 计算可见性方差（Computing visibility variance）
+
+该技术用过去四帧的数据决定每个片段、每个光源需要多少采样。我们将可见性值存于 3D RGBA16 纹理中，每个通道对应一帧的可见性，每一层存储单个光源的可见性历史。
+
+这是首批使用 3D 派发（dispatch）大小的计算着色器之一，派发调用如下：
+
+```
 gpu_commands->dispatch( x, y, render_scene->active_lights );
-In this pass, we simply compute the difference between the minimum
-and maximum value over the past four frames:
+```
+
+在此 pass 中，我们仅计算过去四帧的最小值与最大值之差：
+
+```
 vec4 last_visibility_values = texelFetch(
 global_textures_3d[ visibility_cache_texture_index ],
 tex_coord, 0 );
@@ -166,30 +135,36 @@ float min_v = min( min( min( last_visibility_values.x,
 last_visibility_values.y ), last_visibility_values.z ),
 last_visibility_values.w );
 float delta = max_v - min_v;
-The historical values are set to 0 during the first frame. We store the
-delta in another 3D texture to be used in the next pass. The following
-figure shows the result of this pass:
+```
+
+首帧时历史值设为 0。将 delta 存入另一个 3D 纹理供下一 pass 使用。下图为本 pass 的结果：
+
 Figure 13.2 – The visibility variation for the past four frames
-Computing visibility
-This pass is responsible for computing how many rays to shoot for each
-light depending on the variance across the past four frames.
-This pass needs to read a lot of data from different textures. We are
-going to use local data storage (LDS) to cache the values across all
-threads within a shader invocation:
+
+### 计算可见性（Computing visibility）
+
+本 pass 根据过去四帧的方差，计算每个光源应发射多少光线。
+
+需要从多个纹理读取大量数据，因此使用本地数据存储（LDS, local data storage）在着色器调用内的所有线程间缓存这些值：
+
+```
 local_image_data[ local_index.y ][ local_index.x ] =
 texelFetch( global_textures_3d[ variation_texture_index
 ], global_index, 0 ).r;
-As we explained in Chapter 9, Implementing Variable Rate Shading, we
-need to be careful about synchronizing these writes by placing a
-barrier() call before accessing the data stored in local_image_data.
-Likewise, we need to populate values around the edges of the matrix.
-The code is the same as before and we won’t replicate it here.
-Next, we are going to filter this data to make it more temporally stable.
-The first step is to compute the maximum value in a 5x5 region and
-store the result in another LDS matrix:
+```
+
+如第 9 章《实现可变速率着色（Variable Rate Shading）》所述，在访问 `local_image_data` 中的数据前，必须通过 `barrier()` 同步这些写入；同时需要填充矩阵边缘的值，代码与之前相同，此处不重复。
+
+接着对该数据做滤波以提高时间稳定性。第一步是计算 5×5 区域的最大值并存入另一个 LDS 矩阵：
+
+```
 local_max_image_data[ local_index.y ][ local_index.x ] =
 max_filter( local_index );
-max_filter is implemented as follows:
+```
+
+`max_filter` 实现如下：
+
+```
 for ( int y = -2; y <= 2; ++y ) {
 for ( int x = -2; x <= 2; ++x ) {
 ivec2 xy = index.xy + ivec2( x, y );
@@ -197,8 +172,11 @@ float v = local_image_data[ xy.y ][ xy.x ];
 max_v = max( max_v, v );
 }
 }
-After computing the max values, we pass them through a 13x13 tent
-filter:
+```
+
+得到最大值后，再通过 13×13 的 tent 滤波（tent filter）：
+
+```
 float spatial_filtered_value = 0.0;
 for ( int y = -6; y <= 6; ++y ) {
 for ( int x = -6; x <= 6; ++x ) {
@@ -209,9 +187,11 @@ float f = tent_kernel[ y + 6 ][ x + 6 ];
 spatial_filtered_value += v * f;
 }
 }
-This is done to smooth out differences between adjacent fragments
-while still giving more weight to the fragment we are processing. We
-then combine this value with temporal data:
+```
+
+这样可以在平滑相邻片段差异的同时，给当前片段更大权重。然后将该值与时间数据结合：
+
+```
 vec4 last_variation_values = texelFetch(
 global_textures_3d[ variation_cache_texture_index ],
 global_index, 0 );
@@ -220,28 +200,38 @@ float filtered_value = 0.5 * ( spatial_filtered_value +
 last_variation_values.y +
 last_variation_values.z +
 last_variation_values.w ) );
-Before moving on, we update the variation cache for the next frame:
+```
+
+继续前先更新下一帧的方差缓存：
+
+```
 last_variation_values.w = last_variation_values.z;
 last_variation_values.z = last_variation_values.y;
 last_variation_values.y = last_variation_values.x;
 last_variation_values.x = texelFetch( global_textures_3d[
 variation_texture_index ], global_index, 0 ).r;
-We now leverage the data we just obtained to compute the visibility
-term. First, we need to determine the sample count. If the reprojection
-in the previous pass has failed, we simply use the maximum sample
-count:
+```
+
+利用上述结果计算可见性项。先确定采样数。若上一 pass 的重投影失败，则直接使用最大采样数：
+
+```
 uint sample_count = MAX_SHADOW_VISIBILITY_SAMPLE_COUNT;
 if ( motion_vectors_value.r != -1.0 ) {
-If the reprojection was successful, we get the sample count for the last
-frame and determine whether the sample count has been stable over the
-past four frames:
+```
+
+若重投影成功，则取上一帧的采样数，并判断过去四帧采样数是否稳定：
+
+```
  sample_count = sample_count_history.x;
 bool stable_sample_count =
 ( sample_count_history.x == sample_count_history.y ) &&
 ( sample_count_history.x == sample_count_history.z ) &&
 ( sample_count_history.x == sample_count_history.w );
-We then combine this information with the filtered value we computed
-previously to determine the sample count for this frame:
+```
+
+再结合前面得到的滤波值决定本帧采样数：
+
+```
 float delta = 0.2;
 if ( filtered_value > delta && sample_count <
 MAX_SHADOW_VISIBILITY_SAMPLE_COUNT ) {
@@ -250,28 +240,30 @@ sample_count += 1;
 sample_count >= 1 ) {
 sample_count -= 1;
 }
-If the filtered value surpasses a given threshold, we are going to
-increase the sample count. This means we identified a high-variance
-value across the past four frames and we’d need more samples to
-converge to a better result.
-If, on the other hand, the sample count has been stable across the past
-four frames, we decrease the sample count.
-While this works well in practice, it could reach a sample count of 0 if
-the scene is stable – for instance, when the camera is not moving. This
-would lead to an unlit scene. For this reason, we force the sample count
-to 1 if the past four frames also had a sample count of 0:
+```
+
+若滤波值超过给定阈值，则增加采样数，表示过去四帧方差较大，需要更多采样才能收敛到更好结果。反之，若过去四帧采样数稳定，则减少采样数。
+
+实践中若场景稳定（例如相机不动），采样数可能减到 0，导致场景无光照。因此若过去四帧采样数均为 0，我们强制将采样数设为 1：
+
+```
 bvec4 hasSampleHistory = lessThan(
 sample_count_history, uvec4( 1 ) );
 bool zeroSampleHistory = all( hasSampleHistory );
 if ( sample_count == 0 && zeroSampleHistory ) {
 sample_count = 1;
 } }
-Here is an example of the sample count cache texture:
+```
+
+下图是采样数缓存纹理的示例：
+
 Figure 13.3 – The sample count cache texture
-Notice that fragments that see the light tend to require more samples, as
-expected.
-Now that we know how many samples we need, we can move on to
-computing the visibility value:
+
+可以看到，能看到光源的片段往往需要更多采样，符合预期。
+
+确定采样数后，开始计算可见性值：
+
+```
 float visibility = 0.0;
 if ( sample_count > 0 ) {
 // world position and normal are computed the same as
@@ -280,20 +272,23 @@ visibility = get_light_visibility(
 gl_GlobalInvocationID.z, sample_count,
 pixel_world_position, normal, frame_index );
 }
-get_light_visibility is the method that traces rays through the scene. It’s
-implemented as follows:
+```
+
+`get_light_visibility` 负责在场景中追踪光线，实现如下：
+
+```
 const vec3 position_to_light = light.world_position –
  world_position;
 const vec3 l = normalize( position_to_light );
 const float NoL = clamp(dot(normal, l), 0.0, 1.0);
 float d = sqrt( dot( position_to_light, position_to_light ) );
-We first compute a few parameters as we have done before for our
-lighting implementation. In addition, we compute d, the distance
-between the world position of this fragment and the light we are
-processing.
-Next, we trace rays through the scene only if this light is close enough
-and it’s not behind geometry at this fragment. This is achieved using the
-following code:
+```
+
+先按光照实现中的方式计算若干参数，并计算 `d`（该片段世界位置与当前光源的距离）。
+
+仅当该光源足够近且在该片段处不被几何体遮挡时，才在场景中追踪光线：
+
+```
 float visiblity = 0.0;
 float attenuation =
 attenuation_square_falloff(position_to_light,
@@ -301,9 +296,11 @@ attenuation_square_falloff(position_to_light,
 const float scaled_distance = r / d;
 if ( ( NoL > 0.001f ) && ( d <= r ) && ( attenuation >
 0.001f ) ) {
-We then trace one ray per sample. To make sure the results converge
-over time, we compute the ray direction by using a pre-computed
-Poisson disk:
+```
+
+然后每个采样发射一条光线。为使结果随时间收敛，使用预计算的泊松盘（Poisson disk）得到光线方向：
+
+```
 for ( uint s = 0; s < sample_count; ++s ) {
 vec2 poisson_sample = POISSON_SAMPLES[ s *
 FRAME_HISTORY_COUNT + frame_index ];
@@ -316,8 +313,11 @@ vec3 random_y = y_axis * poisson_sample.y *
 (scaled_distance) * 0.01;
 vec3 random_dir = normalize(l + random_x +
 random_y);
-Now that we have computed our ray direction, we can start ray
-traversal:
+```
+
+得到光线方向后开始光线遍历：
+
+```
 rayQueryEXT rayQuery;
 rayQueryInitializeEXT(rayQuery, as,
 gl_RayFlagsOpaqueEXT |
@@ -325,9 +325,11 @@ gl_RayFlagsTerminateOnFirstHitEXT,
 0xff, world_position, 0.001,
 random_dir, d);
 rayQueryProceedEXT( rayQuery );
-This code is very similar to the code we presented in the first section,
-but in this case, we accumulate the visibility value for each direction
-the light is visible from:
+```
+
+与第一节的代码类似，这里对每个方向累加光源可见时的可见性值：
+
+```
 if (rayQueryGetIntersectionTypeEXT(rayQuery, true)
 != gl_RayQueryCommittedIntersectionNoneEXT) {
 visibility +=
@@ -339,11 +341,17 @@ visiblity += 1.0f;
 }
 }
 }
-Finally, we return the average of the computed visibility value:
+```
+
+最后返回可见性值的平均：
+
+```
 return visiblity / float( sample_count );
-Now that we have the visibility value for this frame, we need to update
-our visibility history cache. If the reprojection was successful, we simply
-add the new value:
+```
+
+得到本帧可见性后，需要更新可见性历史缓存。若重投影成功，只需加入新值：
+
+```
 vec4 last_visibility_values = vec4(0);
 if ( motion_vectors_value.r != -1.0 ) {
  last_visibility_values = texelFetch(
@@ -352,59 +360,69 @@ global_textures_3d[ visibility_cache_texture_index
 last_visibility_values.w = last_visibility_values.z;
 last_visibility_values.z = last_visibility_values.y;
 last_visibility_values.y = last_visibility_values.x;
-If, on the other hand, the reprojection failed, we overwrite all history
-entries with the new visibility value:
+```
+
+若重投影失败，则用新可见性值覆盖所有历史项：
+
+```
 } else {
 last_visibility_values.w = visibility;
 last_visibility_values.z = visibility;
 } last_visibility_values.y = visibility;
 last_visibility_values.x = visibility;
-The last step is to also update the sample count cache:
+```
+
+最后一步是更新采样数缓存：
+
+```
 sample_count_history.w = sample_count_history.z;
 sample_count_history.z = sample_count_history.y;
 sample_count_history.y = sample_count_history.x;
 sample_count_history.x = sample_count;
-Now that we have updated the visibility term for this frame and
-updated all the caches, we can move to the last pass and compute the
-filtered visibility that will be used in our lighting computation.
-Computing filtered visibility
-If we were to use the visibility value as computed in the previous
-section, the output would be very noisy. For each frame, we might have
-a different sample count and sample positions, especially if the camera
-or objects are moving.
-For this reason, we need to clean up the result before we can use it. One
-common approach is to use a denoiser. A denoiser is usually
-implemented as a series of compute passes that, as the name implies,
-will reduce the noise as much as possible. Denoisers can take a
-significant amount of time, especially as the resolution increases.
-In our case, we are going to use a simple temporal and spatial filter to
-reduce the amount of time this technique takes. As with the previous
-pass, we need to read data into LDS first. This is accomplished by
-following two lines:
+```
+
+在更新本帧可见性项与所有缓存后，进入最后一个 pass，计算将用于光照的滤波后可见性。
+
+### 计算滤波后可见性（Computing filtered visibility）
+
+若直接使用上一节得到的可见性值，输出会非常噪。每帧的采样数和采样位置可能不同，尤其在相机或物体运动时。
+
+因此在使用前需要对结果做清理。常见做法是使用降噪器（denoiser）。降噪器通常由一系列计算 pass 实现，会尽可能降低噪点，但可能耗时较长，尤其在高分辨率下。
+
+这里我们使用简单的时间与空间滤波来缩短耗时。与上一 pass 一样，先把数据读入 LDS：
+
+```
 local_image_data[ local_index.y ][ local_index.x ] =
 visibility_temporal_filter( global_index );
 local_normal_data[ local_index.y ][ local_index.x ] =
 get_normal( global_index );
-visibility_temporal_filter is implemented as follows:
+```
+
+`visibility_temporal_filter` 实现如下：
+
+```
 vec4 last_visibility_values = texelFetch(
 global_textures_3d[ visibility_cache_texture_index ],
 ivec3( xy, index.z ), 0 );
 float filtered_visibility = 0.25 * (
 last_visibility_values.x + last_visibility_values.y +
 last_visibility_values.z + last_visibility_values.w );
-We first read the historical visibility data at this fragment for the given
-light and simply compute the average. This is our temporal filter.
-Depending on your use case, you might use a different weighting
-function, giving more emphasis to more recent values.
-For spatial filtering, we are going to use a Gaussian kernel. The original
-article uses variable-sized kernels according to visibility variance. In our
-implementation, we decided to use a fixed 5x5 Gaussian kernel, as it
-provides good enough results.
-The loop to compute the filtered value is implemented as follows:
+```
+
+先读取该片段、该光源的历史可见性数据并求平均，作为时间滤波。根据需求也可采用不同权重，更偏重近期帧。
+
+空间滤波使用高斯核。原文根据可见性方差使用可变大小核；本实现采用固定的 5×5 高斯核，效果已足够好。
+
+计算滤波值的循环如下：
+
+```
 vec3 p_normal = local_normal_data[ local_index.y ][
 local_index.x ];
-First, we store the normal in our fragment location. We then iterate
-over the kernel size to compute the final term:
+```
+
+先保存当前片段法线，再在核范围内迭代计算最终项：
+
+```
 for ( int y = -2; y <= 2; ++y ) {
 for ( int x = -2; x <= 2; ++x ) {
 ivec2 index = local_index.xy + ivec2( x, y );
@@ -413,25 +431,29 @@ y ][ local_index.x + x ];
 if ( dot( p_normal, q_normal ) <= 0.9 ) {
 continue;
 }
-As described in the article, if the normals of adjacent fragments diverge,
-we ignore this data point. This is done to prevent shadow leaking.
-Finally, we combine the value that has already gone through the
-temporal filter with the kernel value:
+```
+
+如文章所述，若相邻片段法线差异较大，则忽略该采样点，以避免阴影泄漏。最后将已做过时间滤波的值与核权重结合：
+
+```
 float v = local_image_data[ index.y ][ index.x ];
 float k = gaussian_kernel[ y + 2 ][ x + 2 ];
 spatial_filtered_value += v * k;
 }
 }
-The following figure illustrates the content of the filtered visibility
-texture:
+```
+
+下图是滤波后可见性纹理的内容：
+
 Figure 13.4 – The filtered visibility texture
-This concludes the computation of the visibility value for each light.
-We can now use this information during our lighting pass, as described
-in the next section.
-Using the filtered visibility
-Using our visibility term is really simple. In the
-calculate_point_light_contribution method, we simply have to read
-the visibility we have computed in the previous passes:
+
+至此完成了每个光源的可见性计算。下一节说明如何在光照 pass 中使用该信息。
+
+### 使用滤波后可见性（Using the filtered visibility）
+
+使用可见性项很简单。在 `calculate_point_light_contribution` 中，只需读取前面 pass 计算好的可见性：
+
+```
 float shadow = texelFetch( global_textures_3d[
 shadow_visibility_texture_index ], ivec3( screen_uv,
 shadow_light_index ), 0 ).r;
@@ -440,51 +462,27 @@ attenuation_square_falloff(position_to_light, 1.0f /
 light.radius) * shadow;
 if ( attenuation > 0.0001f && NoL > 0.0001f ) {
 // same code as before
-It could be possible to combine traditional shadow maps with a ray
-tracing implementation similar to the one we described here. It all
-depends on the frame budget for the technique, the type of lights in the
-scene, and the desired quality.
-In this section, we have presented a different implementation for ray-
-traced shadows. The first step is to compute and store the visibility
-variance across the past four frames. Next, we computed the sample
-count for each fragment and each light using a max filter followed by a
-tent filter.
-We then used this sample count to trace rays into the scene to
-determine a raw visibility value. In the last pass, we passed this
-visibility value through a temporal and spatial filter to reduce noise.
-Finally, we used this filtered value in our lighting computation.
-Summary
-In this chapter, we have presented two implementations for ray-traced
-shadows. In the first section, we provided a simple implementation
-similar to what you might find in an offline renderer. We simply shoot
-one ray per fragment to each light to determine whether it’s visible or
-not from that position.
-While this works well for point lights, it would require many rays to
-support other light types and render soft shadows. For this reason, we
-also provided an alternative that makes use of spatial and temporal
-information to determine how many samples to use per light.
-We start by computing the visibility variance of the past four frames.
-We then filter this value to determine how many rays to shoot for each
-fragment for each light. We use this count to traverse the scene and
-determine the visibility value for each fragment. Finally, we filter the
-visibility we obtained to reduce the noise. The filtered visibility is then
-used in the lighting computation to determine the final shadow term.
-In the next chapter, we continue our ray tracing journey by
-implementing global illumination!
-Further reading
-The technique we have implemented in this chapter is detailed in
-Chapter 13, Revisiting Shadows with Ray Tracing, of the book Ray Tracing
-Gems. It is freely available here: http://www.realtimerendering.com/
-raytracinggems/rtg/index.html.
-We have only used a limited set of the GLSL APIs available for ray
-tracing. We recommend reading the GLSL extension specification to see
-all the options available:
-• https://github.com/KhronosGroup/GLSL/blob/master/
-extensions/ext/GLSL_EXT_ray_tracing.txt
-• https://github.com/KhronosGroup/GLSL/blob/master/
-extensions/ext/GLSL_EXT_ray_query.txt
-We used a few filters in this chapter. Signal processing is a vast and
-wonderful field that has more implications in graphics programming
-than people realize. To get you started, we recommend this article by
-Bart Wronski: https://bartwronski.com/2021/02/15/bilinear-down-
-upsampling-pixel-grids-and-that-half-pixel-offset/.
+```
+
+也可以将传统阴影贴图与类似本节的光线追踪实现结合，具体取决于该技术的帧预算、场景光源类型和期望质量。
+
+本节介绍了一种不同的光线追踪阴影实现：先计算并存储过去四帧的可见性方差；再用最大值滤波和 tent 滤波得到每个片段、每个光源的采样数；用该采样数在场景中发射光线得到原始可见性；最后在最后一个 pass 中对可见性做时间与空间滤波以降低噪点，并在光照计算中使用该滤波值。
+
+## 小结（Summary）
+
+本章介绍了两种光线追踪阴影实现。第一节给出类似离线渲染器的简单实现：每个片段向每个光源发射一条光线，判断是否可见。这对点光源效果不错，但要支持其他光源类型和软阴影需要大量光线。
+
+因此第二节提供了另一种方案，利用空间与时间信息决定每个光源的采样数：先计算过去四帧的可见性方差，滤波后决定每个片段、每个光源发射多少光线，用该数量遍历场景得到可见性，再对可见性做滤波降噪，最后在光照计算中使用滤波后的可见性得到最终阴影项。
+
+下一章将继续光线追踪之旅，实现全局光照（global illumination）。
+
+## 延伸阅读（Further reading）
+
+本章实现的技术详见《Ray Tracing Gems》第 13 章《Revisiting Shadows with Ray Tracing》。该书可在此免费阅读：http://www.realtimerendering.com/raytracinggems/rtg/index.html。
+
+我们仅使用了 GLSL 光线追踪 API 的一小部分，建议阅读 GLSL 扩展规范了解全部选项：
+
+- https://github.com/KhronosGroup/GLSL/blob/master/extensions/ext/GLSL_EXT_ray_tracing.txt
+- https://github.com/KhronosGroup/GLSL/blob/master/extensions/ext/GLSL_EXT_ray_query.txt
+
+本章用到了几种滤波；信号处理在图形编程中的应用比许多人想象的更广。入门可参考 Bart Wronski 的这篇文章：https://bartwronski.com/2021/02/15/bilinear-down-upsampling-pixel-grids-and-that-half-pixel-offset/.

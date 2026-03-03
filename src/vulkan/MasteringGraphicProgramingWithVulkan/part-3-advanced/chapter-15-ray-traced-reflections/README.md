@@ -1,142 +1,68 @@
-Adding Reflections with Ray
-Tracing
-In this chapter, we are going to implement reflections using ray tracing.
-Before ray tracing hardware was introduced, applications implemented
-reflections using screen-space techniques. However, this technique has
-drawbacks as it can only use information from what’s visible on the
-screen. If one of the rays goes outside the visible geometry on the
-screen, we usually fall back to an environment map. Because of this
-limitation, the rendered reflections can be inconsistent, depending on
-the camera position.
-By introducing ray tracing hardware, we can overcome this limitation
-as we now have access to geometry that is not visible on the screen. The
-downside is that we might need to perform some expensive lighting
-computations. If the reflected geometry is outside the screen, this means
-we don’t have the data from the G-buffer and we need to compute the
-color, light, and shadow data from scratch.
-To lower the cost of this technique, developers usually trace reflections
-at half resolution or use ray tracing only if screen-space reflection fails.
-Another approach is to use lower-resolution geometry in the ray tracing
-path to lower the cost of ray traversal. In this chapter, we are going to
-implement a ray tracing-only solution, as this gives the best-quality
-results. Then, it will be easy to implement the optimizations mentioned
-previously on top of it.
-In this chapter, we’ll cover the following main topics:
-• How screen-space reflections work
-• Implementing ray-traced reflections
-• Implementing a denoiser to make the ray-traced output usable
-Technical requirements
-By the end of the chapter, you will have a good understanding of the
-different solutions available for reflections. You will also learn how to
-implement ray-traced reflections and how to improve the final result
-with the help of a denoiser.
-The code for this chapter can be found at the following URL: https://
-github.com/PacktPublishing/Mastering-Graphics-Programming-with-
-Vulkan/tree/main/source/chapter15.
-How screen-space reflections
-work
-Reflections are an important rendering element that can provide a
-better sense of immersion in the scene. For this reason, developers have
-developed a few techniques over the years to include this effect, even
-before ray tracing hardware was available.
-One of the most common approaches is to ray-march the scene after the
-G-buffer data becomes available. Whether a surface will produce
-reflections is determined by the material’s roughness. Only materials
-with a low roughness will emit a reflection. This also helps reduce the
-cost of this technique since usually, only a low number of surfaces will
-satisfy this requirement.
-Ray marching is a technique similar to ray tracing and was introduced
-in Chapter 10, Adding Volumetric Fog. As a quick reminder, ray marching
-works similarly to ray tracing. Instead of traversing the scene to
-determine whether the ray hit any geometry, we move in the ray’s
-direction by small increments for a fixed number of iterations.
-This has both advantages and disadvantages. The advantage is that this
-technique has a fixed cost independent of the scene’s complexity as the
-maximum number of iterations per ray is pre-determined. The downside
-is that the quality of the results depends on the step size and the
-number of iterations.
-For the best quality, we want a large number of iterations and a small
-step size, but this would make the technique too expensive. The
-compromise is to use a step size that gives good enough results and then
-pass the result through a denoising filter to try and reduce the artifacts
-introduced by the low-frequency sampling.
-As the name implies, this technique works in screen space, similar to
-other techniques such as Screen-Space Ambient Occlusion (SSAO).
-For a given fragment, we start by determining whether it produces a
-reflection or not. If it does, we determine the reflected ray’s direction
-based on the surface normal and view direction.
-Next, we move along the reflected ray direction for the given number of
-iterations and step size. At each step, we check against the depth buffer
-to determine whether we hit any geometry. Since the depth buffer has a
-limited resolution, usually, we define a delta value that determines
-whether we consider a given iteration a hit.
-If the difference between the ray depth and the value stored in the
-depth buffer is under this delta, we can exit the loop; otherwise, we
-must continue. The size of this delta can vary, depending on the scene’s
-complexity, and is usually tweaked manually.
-If the ray marching loop hits visible geometry, we look up the color
-value at that fragment and use it as the reflected color. Otherwise, we
-either return black or determine the reflected color using an
-environment map.
-We are skipping over some implementation details here as they are not
-relevant to this chapter. We have provided resources that go into more
-detail in the Further reading section.
-As mentioned previously, this technique is limited to information that is
-visible on screen. The main drawback is that reflections will disappear
-as the camera moves if the reflected geometry is no longer rendered on
-the screen. The other downside comes from ray marching as we have
-limited resolution in terms of the number and size of steps we can take.
-This can introduce holes in the reflection, which is usually addressed
-through aggressive filtering. This can result in blurry reflections and
-makes it difficult to obtain crisp reflections, depending on the scene and
-viewpoint.
-In this section, we introduced screen space reflections. We explained the
-main ideas behind this technique and some of its shortcomings. In the
-next section, we are going to implement ray-traced reflections, which
-can reduce some of the limitations of this technique.
-Implementing ray-traced
-reflections
-In this section, we are going to leverage the hardware ray tracing
-capabilities to implement reflections. Before diving into the code, here’s
-an overview of the algorithm:
-1. We start with the G-buffer data. We check whether the roughness
-for a given fragment is below a certain threshold. If it is, we move
-to the next step. Otherwise, we don’t process this fragment any
-further.
-2. To make this technique viable in real time, we cast only one
-reflection ray per fragment. We will demonstrate two ways to
-pick the reflection’s ray direction: one that simulates a mirror-like
-surface and another that samples the GGX distribution for a given
-fragment.
-3. If the reflection ray hits some geometry, we need to compute its
-surface color. We shoot another ray toward a light that has been
-selected through importance sampling. If the selected light is
-visible, we compute the color for the surface using our standard
-lighting model.
-4. Since we are using only one sample per fragment, the final output
-will be noisy, especially since we are randomly selecting the
-reflected direction at each frame. For this reason, the output of
-the ray tracing step will be processed by a denoiser. We have
-implemented a technique called spatiotemporal variance-
-guided filtering (SVGF), which has been developed specifically
-for this use case. The algorithm will make use of spatial and
-temporal data to produce a result that contains only a small
-amount of noise.
-5. Finally, we use the denoised data during our lighting computation
-to retrieve the specular color.
-Now that you have a good overview of the steps involved, let’s dive in!
-The first step is checking whether the roughness for a given fragment is
-above a certain threshold:
+# 第15章 用光线追踪实现反射（Adding Reflections with Ray Tracing）
+
+本章将使用光线追踪实现反射。
+
+在引入光线追踪硬件之前，应用通常用屏幕空间技术做反射。但该技术有局限：只能使用屏幕上可见的信息；若某条反射光线超出屏幕上的可见几何体，通常会回退到环境贴图。因此反射效果会随相机位置不一致。
+
+引入光线追踪硬件后，我们可以访问屏幕外的几何体，从而克服这一限制。代价是可能要做昂贵的光照计算：若反射到的几何体在屏幕外，就没有 G-buffer 数据，需要从零计算颜色、光照与阴影。
+
+为降低成本，开发者通常在半分辨率下追踪反射，或仅在屏幕空间反射失败时使用光线追踪。另一种做法是在光线追踪路径中使用较低分辨率几何体以降低光线遍历成本。本章将实现纯光线追踪方案，以获得最佳质量，之后在其上加入上述优化会比较容易。
+
+本章将涵盖以下主题：
+
+- 屏幕空间反射如何工作
+- 实现光线追踪反射
+- 实现降噪器使光线追踪输出可用
+
+## 技术需求（Technical requirements）
+
+学完本章后，你将了解反射的多种实现方式，并学会如何实现光线追踪反射以及如何借助降噪器改善最终结果。
+
+本章代码可在以下地址找到：https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter15。
+
+## 屏幕空间反射如何工作（How screen-space reflections work）
+
+反射是重要的渲染要素，能增强场景沉浸感。因此即便在光线追踪硬件出现之前，开发者就已发展出多种技术来实现该效果。
+
+最常见的一种是在 G-buffer 就绪后对场景进行光线步进（ray-march）。表面是否产生反射由材质粗糙度决定，只有低粗糙度材质才会产生反射，这也有助于控制成本，因为通常只有少量表面满足条件。
+
+光线步进与光线追踪类似，在第 10 章《添加体积雾》中已有介绍。简而言之：光线步进不通过遍历场景判断光线是否击中几何体，而是沿光线方向以固定步长、在固定迭代次数内前进。
+
+这既有优点也有缺点。优点是成本固定，与场景复杂度无关，因为每条光线的最大迭代次数是事先给定的。缺点在于结果质量取决于步长与迭代次数。要获得最佳质量需要大量迭代和较小步长，但这会使技术过于昂贵；折中做法是使用足够好的步长，再将结果通过降噪滤波以减轻低频采样带来的伪影。
+
+顾名思义，该技术在屏幕空间中工作，与屏幕空间环境光遮蔽（SSAO）等类似。对给定片段，先判断是否产生反射；若产生，则根据表面法线与视线方向得到反射光线方向。接着沿反射方向按给定迭代次数与步长步进，每一步与深度缓冲比较以判断是否击中几何体。由于深度缓冲分辨率有限，通常定义一个 delta，若某次迭代中射线深度与深度缓冲的差小于该 delta 则视为命中并退出循环，否则继续。该 delta 的大小可随场景复杂度调整，一般需手动调节。若光线步进击中可见几何体，则取该片段处的颜色作为反射颜色；否则返回黑色或用环境贴图得到反射颜色。此处略过一些与本章无关的实现细节，延伸阅读中有更详细的资料。
+
+如前所述，该技术受限于屏幕上可见的信息。主要缺点是：当反射到的几何体不再出现在屏幕上时，反射会随相机移动而消失。另一缺点来自光线步进本身——步数与步长分辨率有限，可能在反射中产生空洞，通常通过强滤波弥补，导致反射模糊，难以在部分场景与视角下得到清晰反射。
+
+本节介绍了屏幕空间反射的主要思路与不足。下一节将实现光线追踪反射，以减轻这些限制。
+
+## 实现光线追踪反射（Implementing ray-traced reflections）
+
+本节将利用硬件光线追踪能力实现反射。在进入代码前，先概括算法：
+
+1. 从 G-buffer 出发，判断给定片段的粗糙度是否低于某阈值；若是则继续，否则不再处理该片段。
+2. 为使技术能实时运行，每个片段只发射一条反射光线。我们将展示两种选取反射方向的方式：一种模拟镜面，另一种对给定片段按 GGX 分布采样。
+3. 若反射光线击中几何体，需计算其表面颜色。向通过重要性采样（importance sampling）选出的光源再发射一条光线；若该光源可见，则用标准光照模型计算反射表面颜色。
+4. 由于每片段仅一个采样，最终输出会带噪，尤其每帧随机选取反射方向时。因此光线追踪步骤的输出将经过降噪器处理。我们实现了一种称为时空方差引导滤波（Spatiotemporal Variance-Guided Filtering, SVGF）的算法，专为此类用途设计，会利用空间与时间数据得到仅含少量噪点的结果。
+5. 最后在光照计算中使用降噪后的数据得到高光颜色。
+
+下面进入实现。第一步是判断给定片段的粗糙度是否低于某阈值：
+
+```
 if ( roughness <= 0.3 ) {
-We have selected 0.3 as it gives us the results we are looking for,
-though feel free to experiment with other values. If this fragment is
-contributing to the reflection computation, we initialize our random
-number generator and compute the two values needed to sample the
-GGX distribution:
+```
+
+我们选择 0.3 以得到期望效果，也可尝试其他值。若该片段参与反射计算，则初始化随机数生成器并计算采样 GGX 分布所需的两个值：
+
+```
 rng_state = seed( gl_LaunchIDEXT.xy ) + current_frame;
 float U1 = rand_pcg() * rnd_normalizer;
 float U2 = rand_pcg() * rnd_normalizer;
-The two random functions can be implemented as follows:
+```
+
+两个随机函数可实现如下：
+
+```
 uint seed(uvec2 p) {
 } return 19u * p.x + 47u * p.y + 101u;
 uint rand_pcg() {
@@ -146,29 +72,33 @@ uint word = ((state >> ((state >> 28u) + 4u)) ^ state)
 277803737u;
 return (word >> 22u) ^ word;
 }
-These two functions have been taken from the wonderful Hash Functions
-for GPU Rendering paper, which we highly recommend. It contains many
-other functions that you can experiment with. We selected this seed
-function so that we can use the fragment’s position.
-Next, we need to pick our reflection vector. As mentioned previously,
-we have implemented two techniques. For the first technique, we
-simply reflect the view vector around the surface normal for a mirror-
-like surface. This can be computed as follows:
+```
+
+这两个函数来自《Hash Functions for GPU Rendering》一文，强烈推荐阅读，文中还有多种可尝试的函数。我们选用该 seed 以便基于片段位置。
+
+接着选取反射向量。如前所述，我们实现了两种方式。第一种简单地将视线向量绕表面法线反射，得到镜面效果：
+
+```
 vec3 reflected_ray = normalize( reflect( incoming, normal ) );
-When using this method, we get the following output:
+```
+
+使用该方法得到的效果如下：
+
 Figure 15.1 – Mirror-like reflections
-The other method computes the normal by randomly sampling the GGX
-distribution:
+
+第二种通过随机采样 GGX 分布计算法线：
+
+```
 vec3 normal = sampleGGXVNDF( incoming, roughness, roughness,
 U1, U2 );
 vec3 reflected_ray = normalize( reflect( incoming, normal ) );
-The sampleGGXVNDF function has been taken from the Sampling the
-GGX Distribution of Visible Normals paper. Its implementation is clearly
-described in this paper; we suggest you read it for more details.
-In brief, this method computes a random normal according to the BRDF
-of the material and the view direction. This process is needed to make
-sure the computed reflection is more physically accurate.
-Next, we must trace a ray in the scene:
+```
+
+`sampleGGXVNDF` 来自《Sampling the GGX Distribution of Visible Normals》一文，该文对其实现有清晰描述，建议阅读。简而言之，该方法根据材质 BRDF 与视线方向按概率得到随机法线，以使反射更符合物理。
+
+接着在场景中追踪光线：
+
+```
 traceRayEXT( as, // topLevel
 gl_RayFlagsOpaqueEXT, // rayFlags
 0xff, // cullMask
@@ -181,106 +111,114 @@ reflected_ray, // direction
 100.0, // Tmax
 0 // payload index
 );
-If the ray has a hit, we use importance sampling to select a light for our
-final color computation. The main idea behind importance sampling is
-to determine which element, which light in our case, is more likely to
-be selected based on a given probability distribution.
-We have adopted the importance value described in the Importance
-Sampling of Many Lights on the GPU chapter from the book Ray Tracing
-Gems.
-We start by looping through all the lights in the scene:
+```
+
+若光线有命中，则用重要性采样选取一个光源用于最终颜色计算。重要性采样的核心是根据给定概率分布决定哪个元素（此处为光源）更可能被选中。我们采用《Ray Tracing Gems》中《Importance Sampling of Many Lights on the GPU》一章描述的重要性值。先遍历场景中所有光源：
+
+```
 for ( uint l = 0; l < active_lights; ++l ) {
 Light light = lights[ l ];
-Next, we compute the angle between the light and the normal of the
-triangle that has been hit:
+```
+
+计算光源与命中三角形法线之间的夹角：
+
+```
 vec3 p_to_light = light.world_position - p_world.xyz;
 float point_light_angle = dot( normalize( p_to_light ),
 triangle_normal );
  float theta_i = acos( point_light_angle );
-Then, we compute the distance between the light and the fragment
-position in the world space:
+```
+
+再计算光源与片段世界空间位置的距离：
+
+```
 float distance_sq = dot( p_to_light, p_to_light );
 float r_sq = light.radius * light.radius;
-After, we use these two values to determine whether this light should be
-considered for this fragment:
+```
+
+用这两个值判断该光源是否应参与该片段的计算：
+
+```
 bool light_active = ( point_light_angle > 1e-4 ) && (
 distance_sq <= r_sq );
-The next step involves computing an orientation parameter. This tells us
-whether the light is shining directly on the fragment or at an angle:
+```
+
+接着计算朝向参数，表示光源是正对片段还是成角度照射：
+
+```
 float theta_u = asin( light.radius / sqrt( distance_sq
 ) );
 float theta_prime = max( 0, theta_i - theta_u );
 float orientation = abs( cos( theta_prime ) );
-Finally, we must compute the importance value by also taking into
-account the intensity of the light:
+```
+
+最后结合光源强度计算重要性值：
+
+```
 float importance = ( light.intensity * orientation ) /
 distance_sq;
 float final_value = light_active ? importance : 0.0;
 lights_importance[ l ] = final_value;
-If the given light is not considered active for this fragment, its
-importance will have a value of 0. Finally, we must accumulate the
-importance value for this light:
+```
+
+若该光源对该片段不参与，其重要性为 0。最后累加该光源的重要性：
+
+```
 } total_importance += final_value;
-Now that we have the importance values, we need to normalize them.
-Like any other probability distribution function, our values need to sum
-to 1:
+```
+
+得到各光源重要性后需做归一化。与任意概率分布一样，这些值之和应为 1：
+
+```
 for ( uint l = 0; l < active_lights; ++l ) {
 lights_importance[ l ] /= total_importance;
 }
-We can now select the light to be used for this frame. First, we must
-generate a new random value:
+```
+
+接着选取本帧使用的光源。先生成新的随机值：
+
+```
 float rnd_value = rand_pcg() * rnd_normalizer;
-Next, we must loop through the lights and accumulate the importance
-of each light. Once the accumulated value is greater than our random
-value, we have found the light to use:
+```
+
+再遍历光源并累加各自的重要性，当累加值超过随机值即选中该光源：
+
+```
 for ( ; light_index < active_lights; ++light_index ) {
 accum_probability += lights_importance[ light_index ];
 if ( accum_probability > rnd_value ) {
 break;
 }
 }
-Now that we have selected the light, we must cast a ray toward it to
-determine whether it’s visible or not. If it’s visible, we compute the final
-color for the reflected surface using our lighting model.
-We compute the shadow factor as described in Chapter 13, Revisiting
-Shadows with Ray Tracing, and the color is calculated in the same way as
-in Chapter 14, Adding Dynamic Diffuse Global Illumination with Ray
-Tracing.
-This is the result:
+```
+
+选中光源后，向该光源发射光线判断是否可见；若可见，则用光照模型计算反射表面的最终颜色。阴影因子按第 13 章《用光线追踪重新实现阴影》的方式计算，颜色计算与第 14 章《用光线追踪实现动态漫反射全局光照》相同。结果如下：
+
 Figure 15.2 – The noisy output of the ray tracing step
-In this section, we illustrated our implementation of ray-traced
-reflections. First, we described two ways to select a ray direction. Then,
-we demonstrated how to use importance sampling to select the light to
-use in our computation. Finally, we described how the selected light is
-used to determine the final color of the reflected surface.
-The result of this step will be noisy and cannot be used directly in our
-lighting computation. In the next section, we will implement a denoiser
-that will help us remove most of this noise.
-Implementing a denoiser
-To make the output of our reflection pass usable for lighting
-computations, we need to pass it through a denoiser. We have
-implemented an algorithm called SVGF, which has been developed to
-reconstruct color data for path tracing.
-SVGF consists of three main passes:
-1. First, we compute the integrated color and moments for
-luminance. This is the temporal step of the algorithm. We
-combine the data from the previous frame with the result of the
-current frame.
-2. Next, we compute an estimate for variance. This is done using the
-first and second moment values we computed in the first step.
-3. Finally, we perform five passes of a wavelet filter. This is the
-spatial step of the algorithm. At each iteration, we apply a 5x5
-filter to reduce the remaining noise as much as possible.
-Now that you have an idea of the main algorithm, we can proceed with
-the code details. We start by computing the moments for the current
-frame:
+
+本节说明了光线追踪反射的实现：先介绍两种选取光线方向的方式，再演示如何用重要性采样选取光源，最后说明如何用选中的光源得到反射表面的最终颜色。该步骤的结果带噪，不能直接用于光照计算。下一节将实现降噪器以去除大部分噪点。
+
+## 实现降噪器（Implementing a denoiser）
+
+为使反射 pass 的输出能用于光照计算，需要经过降噪器。我们实现的算法称为 SVGF，专为路径追踪的颜色重建而设计。
+
+SVGF 包含三个主要 pass：
+
+1. 先计算颜色与亮度（luminance）矩的积分，这是算法的时间步，将上一帧数据与本帧结果结合。
+2. 再根据第一步得到的一阶、二阶矩估计方差。
+3. 最后执行五遍小波滤波（wavelet filter），这是算法的空间步，每遍应用 5×5 滤波以尽可能减少剩余噪点。
+
+下面进入代码细节。先计算本帧的矩：
+
+```
 float u_1 = luminance( reflections_color );
 float u_2 = u_1 * u_1;
 vec2 moments = vec2( u_1, u_2 );
-Next, we use the motion vectors value – the same values we computed
-in Chapter 11, Temporal Anti-Aliasing – to determine whether we can
-combine the data for the current frame with the previous frame.
-First, we compute the position on the screen of the previous frame:
+```
+
+使用运动向量（与第 11 章《时间性抗锯齿》中计算的相同）判断能否将本帧数据与上一帧结合。先计算上一帧在屏幕上的位置：
+
+```
 bool check_temporal_consistency( uvec2 frag_coord ) {
 vec2 frag_coord_center = vec2( frag_coord ) + 0.5;
 vec2 motion_vector = texelFetch( global_textures[
@@ -288,14 +226,21 @@ motion_vectors_texture_index ],
 ivec2( frag_coord ), 0 ).rg;
 vec2 prev_frag_coord = frag_coord_center +
 motion_vector;
-Next, we check whether the old fragment coordinates are valid:
+```
+
+检查上一帧片段坐标是否有效：
+
+```
 if ( any( lessThan( prev_frag_coord, vec2( 0 ) ) ) ||
 any( greaterThanEqual( prev_frag_coord,
 resolution ) ) ) {
 return false;
  }
-Then, we check whether the mesh ID is consistent with the previous
-frame:
+```
+
+再检查 mesh ID 与上一帧是否一致：
+
+```
 uint mesh_id = texelFetch( global_utextures[
 mesh_id_texture_index ],
 ivec2( frag_coord ), 0 ).r;
@@ -305,10 +250,11 @@ ivec2( prev_frag_coord ), 0 ).r;
 if ( mesh_id != prev_mesh_id ) {
 return false;
 }
-Next, we check for large depth discontinuities, which can be caused by
-disocclusion from the previous frame. We make use of the difference
-between the current and previous frame’s depth, and also of the screen
-space derivative of the depth for the current frame:
+```
+
+接着检查大的深度不连续（可能由上一帧的遮挡解除引起），利用本帧与上一帧的深度差以及本帧深度的屏幕空间导数：
+
+```
 float z = texelFetch( global_textures[
 depth_texture_index ],
 ivec2( frag_coord ), 0 ).r;
@@ -324,15 +270,22 @@ depth_normal_dd.x + 1e-2 );
 if ( depth_diff > 10 ) {
 return false;
 }
-The last consistency check is done by using the normal value:
+```
+
+最后用法线做一致性检查：
+
+```
 float normal_diff = distance( normal, prev_normal ) / (
 depth_normal_dd.y + 1e-2
 );
 if ( normal_diff > 16.0 ) {
 return false;
 }
-If all of these tests pass, this means the values from the previous frame
-can be used for temporal accumulation:
+```
+
+若以上检查均通过，则上一帧数据可用于时间累积：
+
+```
 if ( is_consistent ) {
 vec3 history_reflections_color = texelFetch(
 global_textures[ history_reflections_texture_index ],
@@ -345,21 +298,30 @@ integrated_color_out = reflections_color * alpha +
 ( 1 - alpha ) * history_reflections_color;
 integrated_moments_out = moments * alpha + ( 1 - alpha
 ) * moments;
-If the consistency check fails, we will only use the data from the current
-frame:
+```
+
+若一致性检查失败，则仅使用本帧数据：
+
+```
 } else {
 integrated_color_out = reflections_color;
 integrated_moments_out = moments;
 }
-This concludes the accumulation pass. This is the output we obtain:
+```
+
+累积 pass 到此结束。得到的效果如下：
+
 Figure 15.3 – The color output after the accumulation step
-The next step is to compute the variance. This can easily be done as
-follows:
+
+下一步是计算方差：
+
+```
 float variance = moments.y - pow( moments.x, 2 );
-Now that we have our accumulated value, we can start implementing
-the wavelet filter. As mentioned previously, this is a 5x5 cross-bilateral
-filter. We start with the familiar double loop, being careful not to access
-out-of-bounds values:
+```
+
+得到累积值后开始实现小波滤波。如前所述，这是 5×5 交叉双边滤波（cross-bilateral filter）。先写熟悉的双重循环，注意不要越界访问：
+
+```
 for ( int y = -2; y <= 2; ++y) {
 for( int x = -2; x <= 2; ++x ) {
 ivec2 offset = ivec2( x, y );
@@ -369,18 +331,28 @@ greaterThanEqual( q, ivec2( resolution ) ) ) )
 {
 continue;
  }
-Next, we compute the filter kernel value and weighting value, w:
+```
+
+计算滤波核值与权重 w：
+
+```
 float h_q = h[ x + 2 ] * h[ y + 2 ];
 float w_pq = compute_w( frag_coord, q );
 float sample_weight = h_q * w_pq;
-We’ll explain the implementation of the weighting function in a
-moment. Next, we load the integrated color and variance for the given
-fragment:
+```
+
+权重函数的实现稍后说明。接着加载该片段的积分颜色与方差：
+
+```
 vec3 c_q = texelFetch( global_textures[
 integrated_color_texture_index ], q, 0 ).rgb;
 float prev_variance = texelFetch( global_textures[
 variance_texture_index ], q, 0 ).r;
-Lastly, we accumulate the new color and variance values:
+```
+
+最后累加新的颜色与方差：
+
+```
 new_filtered_color += h_q * w_pq * c_q;
 color_weight += sample_weight;
 new_variance += pow( h_q, 2 ) * pow( w_pq, 2 ) *
@@ -388,17 +360,18 @@ prev_variance;
 variance_weight += pow( sample_weight, 2 );
 }
 }
-Before storing the newly computed values, we need to divide them by
-the accumulated weight:
+```
+
+存储前需除以累加权重：
+
+```
 new_filtered_color /= color_weight;
 new_variance /= variance_weight;
-We repeat this process five times. The resulting color output will be
-used for our lighting computation for the specular color.
-As promised, we are now going to look at the weight computation.
-There are three elements to the weight: normal, depth, and luminance.
-In the code, we tried to follow the naming from the paper so that it’s
-easier to match with our implementation of the formulas.
-We start with the normals:
+```
+
+上述过程重复五次。得到的颜色将用于光照计算中的高光颜色。下面说明权重计算。权重由法线、深度与亮度三部分组成，代码中尽量沿用论文命名以便与公式对应。先写法线部分：
+
+```
 vec2 encoded_normal_p = texelFetch( global_textures[
 normals_texture_index ], p, 0 ).rg;
 vec3 n_p = octahedral_decode( encoded_normal_p );
@@ -406,10 +379,11 @@ vec2 encoded_normal_q = texelFetch( global_textures[
 normals_texture_index ], q, 0 ).rg;
 vec3 n_q = octahedral_decode( encoded_normal_q );
 float w_n = pow( max( 0, dot( n_p, n_q ) ), sigma_n );
-We compute the cosine between the normal of the current fragment and
-the fragment from the filter to determine the weight of the normal
-component.
-We look at depth next:
+```
+
+用当前片段与滤波邻域片段的法线夹角（余弦）作为法线权重。再看深度：
+
+```
 float z_dd = texelFetch( global_textures[ depth_normal_dd_
 texture_index ], p, 0 ).r;
 float z_p = texelFetch( global_textures[ depth_texture_index ],
@@ -418,20 +392,22 @@ float z_q = texelFetch( global_textures[ depth_texture_index ],
 q, 0 ).r;
 float w_z = exp( -( abs( z_p – z_q ) / ( sigma_z * abs(
 z_dd ) + 1e-8 ) ) );
-In a similar fashion to the accumulation step, we make use of the
-difference between the depth values between two fragments. The
-screen-space derivative is also included. As before, we want to penalize
-large depth discontinuities.
-The last weight element is luminance. We start by computing the
-luminance for the fragments we are processing:
+```
+
+与累积步类似，利用两片段深度差及屏幕空间导数，对大的深度不连续施加惩罚。最后是亮度权重。先计算所处理片段的亮度：
+
+```
 vec3 c_p = texelFetch( global_textures[ integrated_color_
 texture_index ], p, 0 ).rgb;
 vec3 c_q = texelFetch( global_textures[ integrated_color_
 texture_index ], q, 0 ).rgb;
 float l_p = luminance( c_p );
 float l_q = luminance( c_q );
-Next, we pass the variance value through a Gaussian filter to reduce
-instabilities:
+```
+
+将方差经高斯滤波以减少不稳定：
+
+```
 float g = 0.0;
 const int radius = 1;
 for ( int yy = -radius; yy <= radius; yy++ ) {
@@ -443,76 +419,45 @@ variance_texture_index ], s, 0 ).r;
 g += v * k;
 }
 }
-Finally, we compute the luminance weight and combine it with the
-other two weight values:
+```
+
+最后计算亮度权重并与其他两项结合：
+
+```
 float w_l = exp( -( abs( l_p - l_q ) / ( sigma_l * sqrt
 ( g ) + 1e-8 ) ) );
 return w_z * w_n * w_l;
-This concludes our implementation of the SVGF algorithm. After five
-passes, we get the following output:
+```
+
+至此完成了 SVGF 的实现。五遍滤波后得到：
+
 Figure 15.4 – The output at the end of the denoising step
-In this section, we described how to implement a common denoising
-algorithm. The algorithm consists of three passes: an accumulation
-phase for the color and luminance moments, a step for computing
-luminance variance, and a step for the wavelet filter, which is repeated
-five times.
-Summary
-In this chapter, we described how to implement ray-traced reflections.
-We started with an overview of screen-space reflection, a technique that
-was used for many years before ray tracing hardware was available. We
-explained how it works and some of its limitations.
-Next, we described our ray tracing implementation to determine
-reflection values. We provided two methods to determine the reflected
-ray direction and explained how the reflected color is computed if a hit
-is returned.
-Since we only use one sample per fragment, the result of this step is
-noisy. To reduce as much of this noise as possible, we implemented a
-denoiser based on SVGF. This technique consists of three passes. First,
-there’s a temporal accumulation step to compute color and luminance
-moments. Then, we compute the luminance variance. Finally, we
-process the color output by passing it through five iterations of a
-wavelet filter.
-This chapter also concludes our book! We hope you enjoyed reading it
-as much as we had fun writing it. When it comes to modern graphics
-techniques, there is only so much that can be covered in a single book.
-We have included what we thought are some of the most interesting
-features and techniques when it comes to implementing them in
-Vulkan. Our goal is to provide you with a starting set of tools that you
-can build and expand upon. We wish you a wonderful journey on the
-path to mastering graphics programming!
-We very much welcome your feedback and corrections, so please feel
-free to reach out to us.
-Further reading
-We have only provided a brief introduction to screen-space reflections.
-The following articles go into more detail about their implementation,
-their limitations, and how to improve the final results:
-• https://lettier.github.io/3d-game-shaders-for-beginners/screen-
-space-reflection.html
-• https://bartwronski.com/2014/01/25/the-future-of-screenspace-
-reflections/
-• https://bartwronski.com/2014/03/23/gdc-follow-up-screenspace-
-reflections-filtering-and-up-sampling/
-We have only used one of the many hashing techniques presented in the
-paper Hash Functions for GPU Rendering: https://jcgt.org/
-published/0009/03/02/.
-This link contains more details about the sampling technique we used to
-determine the reflection vector by sampling the BRDF – Sampling the
-GGX Distribution of Visible Normals: https://jcgt.org/
-published/0007/04/01/.
-For more details about the SVGF algorithm we presented, we
-recommend reading the original paper and supporting material: https://
-research.nvidia.com/publication/2017-07_spatiotemporal-variance-
-guided-filtering-real-time-reconstruction-path-traced.
-We used importance sampling to determine which light to use at each
-frame. Another technique that has become popular in the last few years
-is Reservoir Spatio-Temporal Importance Resampling (ReSTIR). We
-highly recommend reading the original paper and looking up the other
-techniques that have been inspired by it: https://research.nvidia.com/
-publication/2020-07_spatiotemporal-reservoir-resampling-real-time-
-Ray-Tracing-dynamic-direct.
-In this chapter, we implemented the SVGF algorithm from scratch for
-pedagogical purposes. Our implementation is a good starting point to
-build upon, but we also recommend looking at production denoisers
-from AMD and Nvidia to compare results:
-• https://gpuopen.com/fidelityfx-denoiser/
-• https://developer.nvidia.com/rtx/Ray-Tracing/rt-denoisers
+
+本节介绍了常见降噪算法的实现。算法包含三个 pass：颜色与亮度矩的累积、亮度方差估计、以及重复五遍的小波滤波。
+
+## 小结（Summary）
+
+本章介绍了如何实现光线追踪反射。先从屏幕空间反射的概览入手，这是光线追踪硬件出现前长期使用的技术，并说明了其原理与局限。接着描述了用于得到反射值的光线追踪实现，给出了两种确定反射光线方向的方法，以及有命中时如何计算反射颜色。由于每片段仅一个采样，该步骤结果带噪；为尽量降噪，我们实现了基于 SVGF 的降噪器。该技术包含三个 pass：先是颜色与亮度矩的时间累积，再计算亮度方差，最后对颜色输出做五遍小波滤波。
+
+本章也标志着本书的结束。希望你在阅读中收获与我们写作时同等的乐趣。现代图形技术无法在一本书中穷尽，我们选取了在 Vulkan 中实现时最具代表性的功能与技术，旨在提供一套可在此基础上扩展的入门工具。祝你在掌握图形编程的路上一切顺利。我们非常欢迎反馈与勘误，欢迎随时联系。
+
+## 延伸阅读（Further reading）
+
+我们仅对屏幕空间反射做了简要介绍，以下文章对其实现、局限与改进有更详细说明：
+
+- https://lettier.github.io/3d-game-shaders-for-beginners/screen-space-reflection.html
+- https://bartwronski.com/2014/01/25/the-future-of-screenspace-reflections/
+- https://bartwronski.com/2014/03/23/gdc-follow-up-screenspace-reflections-filtering-and-up-sampling/
+
+我们只使用了《Hash Functions for GPU Rendering》中多种哈希技术之一：https://jcgt.org/published/0009/03/02/。
+
+通过采样 BRDF 确定反射向量的采样技术详见《Sampling the GGX Distribution of Visible Normals》：https://jcgt.org/published/0007/04/01/。
+
+本节介绍的 SVGF 算法详见原文与补充材料：https://research.nvidia.com/publication/2017-07_spatiotemporal-variance-guided-filtering-real-time-reconstruction-path-traced。
+
+我们使用重要性采样决定每帧使用的光源。近年来另一种流行技术是 Reservoir 时空重要性重采样（ReSTIR），建议阅读原文并了解受其启发的其他工作：https://research.nvidia.com/publication/2020-07_spatiotemporal-reservoir-resampling-real-time-Ray-Tracing-dynamic-direct。
+
+本章为教学目的从零实现了 SVGF，可作为进一步改进的起点；也建议参考 AMD 与 Nvidia 的商用降噪器以对比效果：
+
+- https://gpuopen.com/fidelityfx-denoiser/
+- https://developer.nvidia.com/rtx/Ray-Tracing/rt-denoisers

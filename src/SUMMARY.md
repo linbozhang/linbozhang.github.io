@@ -44,6 +44,10 @@
   * [第9章 可变着色率](vulkan/MasteringGraphicProgramingWithVulkan/part-2-gpu-driven/chapter-09-variable-rate-shading/README.md)
   * [第10章 体积雾](vulkan/MasteringGraphicProgramingWithVulkan/part-2-gpu-driven/chapter-10-volumetric-fog/README.md)
   * [第11章 时间性抗锯齿 (TAA)](vulkan/MasteringGraphicProgramingWithVulkan/part-3-advanced/chapter-11-taa/README.md)
+  * [第12章 光追入门](vulkan/MasteringGraphicProgramingWithVulkan/part-3-advanced/chapter-12-ray-tracing/README.md)
+  * [第13章 光追阴影](vulkan/MasteringGraphicProgramingWithVulkan/part-3-advanced/chapter-13-ray-traced-shadows/README.md)
+  * [第14章 DDGI](vulkan/MasteringGraphicProgramingWithVulkan/part-3-advanced/chapter-14-ddgi/README.md)
+  * [第15章 光追反射](vulkan/MasteringGraphicProgramingWithVulkan/part-3-advanced/chapter-15-ray-traced-reflections/README.md)
 
 * [站点](site/README.md)
   * [文档库配置](site/doc-setup/README.md)

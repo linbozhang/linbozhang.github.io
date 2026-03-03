@@ -1,97 +1,30 @@
-Getting Started with Ray Tracing
-In this chapter, we are introducing ray tracing into our rendering
-pipeline. Thanks to the addition of hardware support for ray tracing in
-modern GPUs, it’s now possible to integrate ray tracing techniques into
-real-time rendering.
-Ray tracing requires a different setup compared to the traditional
-rendering pipeline, which is why we are dedicating a whole chapter to
-setting up a ray tracing pipeline. We are going to cover in detail how to
-set up a shader binding table to tell the API which shaders to invoke
-when an intersection test for a given ray succeeds or fails.
-Next, we are going to explain how to create the Bottom Level
-Acceleration Structure (BLAS) and Top Level Acceleration Structure
-(TLAS). These Acceleration Structures (AS) are needed to speed up
-scene ray traversal and ensure that ray tracing can be performed at an
-interactive rate.
-In this chapter, we’ll cover the following main topics:
-• Introduction to ray tracing in Vulkan
-• Building the BLAS and TLAS
-• Defining and creating a ray tracing pipeline
-Technical requirements
-The code for this chapter can be found at the following URL: https://
-github.com/PacktPublishing/Mastering-Graphics-Programming-with-
-Vulkan/tree/main/source/chapter12.
-Introduction to ray tracing in
-Vulkan
-Ray tracing support in hardware was first introduced in 2018 with the
-NVidia RTX series. Originally, ray tracing support in Vulkan was only
-available through an NVidia extension, but later, the functionality was
-ratified through a Khronos extension to allow multiple vendors to
-support the ray tracing API in Vulkan. We are dedicating a full chapter
-just to the setup of a ray tracing pipeline, as it requires new constructs
-that are specific to ray tracing.
-The first departure from the traditional rendering pipeline is the need to
-organize our scene into Acceleration Structures. These structures are
-needed to speed up scene traversal, as they allow us to skip entire
-meshes that the ray has no chance to intersect with.
-These Acceleration Structures are usually implemented as a Bounded
-Volume Hierarchy (BVH). A BVH subdivides the scene and individual
-meshes into bounding boxes and then organizes them into a tree. Leaf
-nodes of this tree are the only nodes containing geometry data, while
-parent nodes define the position and extent of the volume that
-encompasses the children.
-A simple scene and its BVH representation is illustrated by the following
-image:
-Figure 12.1 – A scene example on the left and its BVH representation on
-the right (source: Wikipedia)
-The Vulkan API makes a further distinction between a TLAS and BLAS.
-A BLAS contains individual mesh definitions. These can then be
-grouped into a TLAS, where multiple instances of the same mesh can be
-placed in the scene by defining their transform matrices.
-This organization is pictured in the following figure:
-Figure 12.2 – Each BLAS can be added multiple times to a TLAS with
-different shading and transform details (source: Vulkan spec)
-Now that we have defined our Acceleration Structures, we can turn our
-attention to the ray tracing pipeline. The major change introduced with
-ray tracing pipelines is the ability to call other shaders within a shader.
-This is achieved by defining shader binding tables. Each slot in these
-tables defines one of the following shader types:
-• Ray generation: In a traditional ray tracing pipeline, this is the
-entry point from which rays are generated. As we will see in later
-chapters, rays can also be spawned from fragments and compute
-shaders.
-• Intersection: This shader allows the application to implement
-custom geometry primitives. In Vulkan, we can only define
-triangles and Axis-Aligned Bounding Boxes (AABB).
-• Any-hit: This is executed after an intersection shader is triggered.
-Its main use is to determine whether the hit should be processed
-further or ignored.
-• Closest hit: This shader is triggered the first time a ray hits a
-primitive.
-• Miss: This shader is triggered if the ray doesn’t hit any primitive.
-• Callable: These are shaders that can be called from within an
-existing shader.
-The flow is summarized in the following figure:
-Figure 12.3 – The shader flow of a ray tracing pipeline (source: Vulkan
-spec)
-In this section, we have provided an overview of how ray tracing is
-implemented in the Vulkan API. In the next section, we are going to
-have a better look at how to create Acceleration Structures.
-Building the BLAS and TLAS
-As we mentioned in the previous section, ray tracing pipelines require
-geometry to be organized into Acceleration Structures to speed up the
-ray traversal of the scene. In this section, we are going to explain how
-to accomplish this in Vulkan.
-We start by creating a list of VkAccelerationStructureGeometryKHR
-when parsing our scene. For each mesh, this data structure is defined as
-follows:
+# 第 12 章：光追入门（Getting Started with Ray Tracing）
+
+本章将**光追（ray tracing）**引入渲染管线。借助现代 GPU 的硬件光追支持，已能在实时渲染中集成光追技术。光追的配置与传统渲染管线不同，因此我们单独用一章搭建光追管线：详细说明如何设置 **shader binding table**，以在射线相交测试成功或失败时告诉 API 调用哪些 shader；接着说明如何创建**底层加速结构（BLAS）**与**顶层加速结构（TLAS）**，二者用于加速场景射线遍历、保证交互式光追。
+
+本章主要内容：
+- Vulkan 中的光追介绍
+- 构建 BLAS 与 TLAS
+- 定义与创建光追 pipeline
+
+## 技术需求
+
+本章代码见：https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter12
+
+## Vulkan 中的光追介绍（Introduction to ray tracing in Vulkan）
+
+硬件光追于 2018 年随 Nvidia RTX 系列首次出现。Vulkan 中最初仅通过 Nvidia 扩展支持，后由 Khronos 扩展标准化，供多厂商实现。我们单独用一章讲解光追管线搭建，因其需要光追专用的新结构。与传统管线的首要区别是：场景必须组织成**加速结构（Acceleration Structures，AS）**，以加速遍历并跳过射线不可能相交的整块 mesh。加速结构通常实现为**包围体层次（BVH）**：将场景与各 mesh 划分为包围盒并组织成树；叶节点才包含几何数据，父节点定义包含子节点的体积位置与范围。Figure 12.1 – 左：场景示例；右：其 BVH 表示（来源：Wikipedia）。Vulkan 进一步区分 **TLAS** 与 **BLAS**：BLAS 存放单个 mesh 定义，可被多次加入 TLAS，通过变换矩阵在场景中放置同一 mesh 的多个实例。Figure 12.2 – 每个 BLAS 可以不同着色与变换多次加入 TLAS（来源：Vulkan spec）。有了加速结构后，可转向**光追 pipeline**：其核心变化是 shader 内可调用其它 shader，通过 **shader binding table** 实现；表中每个槽对应一种 shader 类型：**Ray generation**：传统光追管线的入口，从此发射射线；后文也会从 fragment/compute shader 发射。**Intersection**：用于实现自定义几何图元；Vulkan 中仅支持三角形与 **AABB**。**Any-hit**：在 intersection 触发后执行，用于决定该命中是否继续处理或忽略。**Closest hit**：射线首次命中图元时触发。**Miss**：射线未命中任何图元时触发。**Callable**：可从现有 shader 内调用的 shader。流程见 Figure 12.3 – 光追管线的 shader 流程（来源：Vulkan spec）。本节概述了 Vulkan 中光追的实现方式；下一节详述如何创建加速结构。
+
+## 构建 BLAS 与 TLAS（Building the BLAS and TLAS）
+
+上节提到，光追管线需将几何组织成加速结构以加速场景射线遍历。本节说明在 Vulkan 中的具体做法。解析场景时先创建 `VkAccelerationStructureGeometryKHR` 列表。对每个 mesh，该结构定义如下：
 VkAccelerationStructureGeometryKHR geometry{
 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
 geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
 geometry.flags = mesh.is_transparent() ? 0 :
 VK_GEOMETRY_OPAQUE_BIT_KHR;
 Each geometry structure can define three types of entries: triangles,
-AABBs, and instances. We are going to use triangles here, as that’s how
+AABBs, and instances. We are going to use triangles here, as that's how
 our meshes are defined. We are going to use instances later when
 defining the TLAS.
 The following code demonstrates how the triangles structure is used:
@@ -110,19 +43,11 @@ geometry.geometry.triangles.indexType = mesh.index_type;
 geometry.geometry.triangles.indexData.deviceAddress =
 renderer->gpu->get_buffer_device_address(
 mesh.index_buffer );
-Geometry data is defined as it normally would be for traditional draws:
-we need to provide a vertex and index buffer, a vertex stride, and a
-vertex format. The primitive count is defined in the next structure.
-Finally, we also need to fill a
-VkAccelerationStructureBuildRangeInfoKHR structure to store the
-primitive definition for our mesh:
+几何数据与传统绘制类似：需提供顶点与索引缓冲、顶点步长与格式；图元数量在下一结构中定义。最后填充 `VkAccelerationStructureBuildRangeInfoKHR` 存放该 mesh 的图元定义：
 VkAccelerationStructureBuildRangeInfoKHR build_range_info{ };
 build_range_info.primitiveCount = vertex_count;
 build_range_info.primitiveOffset = mesh.index_offset;
-Now that we have the details for our meshes, we can start building the
-BLAS. This is a two-step process. First, we need to query how much
-memory our AS requires. We do so by defining a
-VkAccelerationStructureBuildGeometryInfoKHR structure:
+有了各 mesh 的几何信息后即可构建 BLAS，分两步。先查询 AS 所需内存，通过填充 `VkAccelerationStructureBuildGeometryInfoKHR` 实现：
 VkAccelerationStructureBuildGeometryInfoKHR as_info{
 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD
 _GEOMETRY_INFO_KHR };
@@ -132,29 +57,25 @@ as_info.mode =
 VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 as_info.geometryCount = scene->geometries.size;
 as_info.pGeometries = scene->geometries.data;
-These flags tell the Vulkan API that this BLAS could be updated or
-compacted in the future:
+下列标志表示该 BLAS 日后可更新或压缩：
 as_info.flags =
 VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR |
 VK_BUILD_ACCELERATION_STRUCTURE_ALLOW
 _COMPACTION_BIT_KHR;
-When querying the size of the AS, we need to provide a list with the
-maximum number of primitives for each geometry entry:
+查询 AS 大小时需提供各几何条目的最大图元数列表：
 for ( u32 range_index = 0; range_index < scene->
 geometries.size; range_index++ ) {
 max_primitives_count[ range_index ] = scene->
  build_range_infos[ range_index ].primitiveCount;
 }
-We are now ready to query the size of our AS:
+然后查询 AS 大小：
 VkAccelerationStructureBuildSizesInfoKHR as_size_info{
 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD
 _SIZES_INFO_KHR };
 vkGetAccelerationStructureBuildSizesKHR( gpu.vulkan_device,
 VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
 &as_info, max_primitives_count.data, &as_size_info );
-When building an AS, we need to provide two buffers: one for the
-actual AS data, and one for a scratch buffer that is used in the building
-process. The two buffers are created as follows:
+构建 AS 需要两个 buffer：一个存 AS 数据，一个作构建用的 scratch buffer。创建如下：
 as_buffer_creation.set(
 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
 ResourceUsageType::Immutable,
@@ -172,20 +93,7 @@ as_size_info.buildScratchSize )
 .set_name( "blas_scratch_buffer" );
 BufferHandle blas_scratch_buffer_handle =
 gpu.create_buffer( as_buffer_creation );
-This is similar to the code for creating buffers that we have used many
-times before, but there are two key differences that we want to
-highlight:
-• The AS buffer needs to be created with the
-VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-usage flag
-• The scratch buffer needs to be created with
-VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR. The
-ray tracing extension also requires the
-VK_KHR_buffer_device_address extension. This allows us to
-query the GPU virtual address for a given buffer, but it has to be
-created with this usage flag.
-Now we have everything we need to create our BLAS. First, we retrieve
-a handle for our AS:
+与以往创建 buffer 类似，但有两点不同：AS buffer 需带 `VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR`；scratch buffer 需带 `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR`，光追扩展还依赖 `VK_KHR_buffer_device_address`，以便查询 buffer 的 GPU 虚拟地址。准备好后先创建 AS 并取得句柄：
 VkAccelerationStructureCreateInfoKHR as_create_info{
 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE
 _CREATE_INFO_KHR };
@@ -198,9 +106,7 @@ VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 vkCreateAccelerationStructureKHR( gpu.vulkan_device,
 &as_create_info, gpu.vulkan_allocation_callbacks,
 &scene->blas );
-At this point, scene->blas is only a handle. To build our acceleration,
-we populate the remaining fields of our
-VkAccelerationStructureBuildGeometryInfoKHR structure:
+此时 `scene->blas` 仅是句柄。为执行构建，补全 `VkAccelerationStructureBuildGeometryInfoKHR` 的其余字段：
 as_info.dstAccelerationStructure = scene->blas;
 as_info.scratchData.deviceAddress =
 gpu.get_buffer_device_address(
@@ -208,21 +114,11 @@ blas_scratch_buffer_handle );
 VkAccelerationStructureBuildRangeInfoKHR* blas_ranges[] = {
 scene->build_range_infos.data
 };
-Finally, we record the command to build the AS:
+最后录制构建 AS 的命令：
 vkCmdBuildAccelerationStructuresKHR( gpu_commands->
 vk_command_buffer, 1, &as_info, blas_ranges );
 gpu.submit_immediate( gpu_commands );
-Notice that we submit this command immediately. This is required
-because it’s not possible to build a BLAS and TLAS on the same
-submission, as the TLAS depends on a fully constructed BLAS.
-The next and final step it to build the TLAS. The process is similar to the
-one we just described for the BLAS and we are going to highlight the
-differences. The TLAS is defined by specifying instances to multiple
-BLASes, where each BLAS can have its own transform. This is very
-similar to traditional instancing: we define our geometry once and it
-can be rendered multiple times by simply changing its transform.
-We start by defining a VkAccelerationStructureInstanceKHR
-structure:
+注意此处**立即提交**该命令：BLAS 与 TLAS 不能在同一提交中构建，因为 TLAS 依赖已构建完成的 BLAS。下一步是构建 TLAS，流程与 BLAS 类似，仅强调差异。TLAS 通过为多个 BLAS 指定实例来定义，每个实例可有自己的变换，与传统 **instancing** 类似：几何只定义一次，通过变换多次渲染。先定义 `VkAccelerationStructureInstanceKHR`：
 VkAccelerationStructureInstanceKHR tlas_structure{ };
 tlas_structure.transform.matrix[ 0 ][ 0 ] = 1.0f;
 tlas_structure.transform.matrix[ 1 ][ 1 ] = 1.0f;
@@ -231,8 +127,7 @@ tlas_structure.mask = 0xff;
 tlas_structure.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 tlas_structure.accelerationStructureReference =
 blas_address;
-As mentioned previously, we provide a BLAS reference and its
-transform. We then need to create a buffer to hold this data:
+如前所述，提供 BLAS 引用与其变换；再创建存放该数据的 buffer：
 as_buffer_creation.reset().set(
 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE
 _BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_
@@ -243,11 +138,7 @@ VkAccelerationStructureInstanceKHR ) )
 .set_name( "tlas_instance_buffer" );
 BufferHandle tlas_instance_buffer_handle =
 gpu.create_buffer( as_buffer_creation );
-Notice the
-VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
-usage flag, which is required for buffers that are going to be used
-during the AS build.
-Next, we define a VkAccelerationStructureGeometryKHR structure:
+注意 `VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR` 标志，用于在 AS 构建期间被读取的 buffer。接着定义 `VkAccelerationStructureGeometryKHR`：
 VkAccelerationStructureGeometryKHR tlas_geometry{
 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
 tlas_geometry.geometryType =
@@ -259,16 +150,12 @@ tlas_geometry.geometry.instances.arrayOfPointers = false;
 tlas_geometry.geometry.instances.data.deviceAddress =
 gpu.get_buffer_device_address(
 tlas_instance_buffer_handle );
-Now that we have defined the structure of our TLAS, we need to query
-its size. We won’t repeat the full code, but here are the differences in
-the VkAccelerationStructureBuildGeometryInfoKHR structure
-compared to when creating a BLAS:
+TLAS 结构定义好后查询其大小；不重复完整代码，仅给出相对 BLAS 时 `VkAccelerationStructureBuildGeometryInfoKHR` 的差异：
 as_info.type =
 VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
 as_info.geometryCount = 1;
 as_info.pGeometries = &tlas_geometry;
-After creating the data and scratch buffer for the TLAS, we are ready to
-get the TLAS handle:
+创建 TLAS 的数据与 scratch buffer 后，取得 TLAS 句柄：
 as_create_info.buffer = tlas_buffer->vk_buffer;
 as_create_info.offset = 0;
 as_create_info.size =
@@ -280,7 +167,7 @@ vkCreateAccelerationStructureKHR( gpu.vulkan_device,
 gpu.vulkan_allocation_
 callbacks,
 &scene->tlas );
-Finally, we can build our TLAS:
+最后构建 TLAS：
 as_info.dstAccelerationStructure = scene->tlas;
 as_info.scratchData.deviceAddress =
 gpu.get_buffer_device_address(
@@ -292,71 +179,13 @@ VkAccelerationStructureBuildRangeInfoKHR* tlas_ranges[] = {
 };
 vkCmdBuildAccelerationStructuresKHR( gpu_commands->
 vk_command_buffer, 1, &as_info, tlas_ranges );
-As before, we submit this command immediately so that the TLAS is
-ready when we start rendering. While it’s not possible to build BLAS
-and TLAS in the same submission, it is possible to create multiple BLAS
-and TLAS in parallel.
-Our Acceleration Structures are now ready to be used for ray tracing!
-In this section, we have detailed the steps required to create BLASes and
-TLASes. We started by recording the triangle primitives for our
-geometry. We then used this data to create a BLAS instance, which was
-then used as part of a TLAS.
-In the next section, we are going to define a ray tracing pipeline that
-makes use of these Acceleration Structures.
-Defining and creating a ray
-tracing pipeline
-Now that we have defined our Acceleration Structures, we can turn our
-attention to ray tracing pipelines. As we mentioned previously, ray
-tracing shaders work differently compared to traditional graphics and
-compute shaders. Ray tracing shaders are setup to call other shaders
-according to the shader binding table setup.
-If you are familiar with C++, you can think of this setup as a simple
-form of polymorphism: the interface of a ray tracing pipeline is always
-the same, but we can dynamically override which shaders (methods) get
-called at runtime. We don’t have to define all the entry points though.
-In this example, for instance, we are going to define only a ray
-generation, the closest hit, and the miss shader. We are ignoring any-hit
-and intersection shaders for now.
-As the name implies, the shader binding table can be represented in
-table form. This is the binding table we are going to build in our
-example:
-The order in the table is important, as that’s the order used by the
-driver to tell the GPU which shader to invoke according to the stage
-that has been triggered.
-Before we start building our pipeline, let’s have a look at three example
-shaders we are going to use. We start with the ray generation shader,
-which is responsible for spawning the rays to traverse our scene. First,
-we have to enable the GLSL extension for ray tracing:
+同样立即提交，以便开始渲染时 TLAS 已就绪。BLAS 与 TLAS 不能同次提交构建，但可并行构建多个 BLAS 与 TLAS。加速结构至此可用于光追。本节详述了创建 BLAS 与 TLAS 的步骤：先记录几何的三角形图元，用其创建 BLAS，再作为 TLAS 的实例。下一节定义使用这些加速结构的光追 pipeline。
+
+## 定义与创建光追 pipeline（Defining and creating a ray tracing pipeline）
+
+有了加速结构后，可着手光追 pipeline。如前所述，光追 shader 与传统图形/compute shader 不同，按 shader binding table 的配置调用其它 shader。熟悉 C++ 可将其理解为一种多态：光追管线的接口固定，运行时动态决定调用哪些 shader（方法）。不必定义所有入口；本例仅定义 ray generation、closest hit 与 miss shader，暂不实现 any-hit 与 intersection。Shader binding table 可表示为表格，示例中我们将构建如下表格：表中**顺序**重要，驱动按触发阶段据此决定调用哪个 shader。在构建 pipeline 前，先看将用到的三个示例 shader。从 **ray generation shader** 开始，负责发射遍历场景的射线。先启用 GLSL 光追扩展：
 #extension GL_EXT_ray_tracing : enable
-Next, we have to define a variable that is going to be populated by
-other shaders:
-layout( location = 0 ) rayPayloadEXT vec4 payload;
-We then define a uniform variable that will contain a reference to our
-AS:
-layout( binding = 1, set = MATERIAL_SET ) uniform
-accelerationStructureEXT as;
-Finally, we define the parameters for our ray generation call:
-{layout( binding = 2, set = MATERIAL_SET ) uniform rayParams
-uint sbt_offset;
-uint sbt_stride;
-uint miss_index;
-uint out_image_index;
-};
-sbt_offset is the offset into our shader binding table, which can be used
-in case multiple shaders of the same type are defined within a shader
-binding table. In our case, this will be 0, as we only have one entry for
-each shader.
-sbt_stride is the size of each entry in the binding table. This value has
-to be queried for each device by passing a
-VkPhysicalDeviceRayTracingPipelinePropertiesKHR structure to
-vkGetPhysicalDeviceProperties2.
-miss_index is used to compute the index of the miss shader. This can be
-used if multiple miss shaders are present within a binding table. It will
-be 0 in our use case.
-Finally, out_image_index is the index of the image in our bindless
-image array to which we are going to write.
-Now that we have defined the inputs and outputs of our ray generation
-shader, we can invoke the function to trace rays into the scene!
+接着定义由其它 shader 写入的变量：`layout( location = 0 ) rayPayloadEXT vec4 payload;`。再定义指向 AS 的 uniform：`layout( binding = 1, set = MATERIAL_SET ) uniform accelerationStructureEXT as;`。最后定义 ray generation 调用的参数（rayParams）：`sbt_offset` 为 shader binding table 的偏移，同类型有多个 shader 时使用；本例每类仅一条，为 0。`sbt_stride` 为表中每条目大小，需通过 `VkPhysicalDeviceRayTracingPipelinePropertiesKHR` 传给 `vkGetPhysicalDeviceProperties2` 查询。`miss_index` 用于计算 miss shader 索引，表中有多个 miss 时使用；本例为 0。`out_image_index` 为 bindless 图像数组中要写入的图像索引。定义好 ray generation 的输入输出后，即可调用函数向场景发射射线：
 traceRayEXT( as, // top level acceleration structure
 gl_RayFlagsOpaqueEXT, // rayFlags
 0xff, // cullMask
@@ -370,68 +199,27 @@ gl_LaunchSizeEXT ),
 100.0, // Tmax
 0 // payload
 );
-The first parameter is the TLAS we want to traverse. Since this is a
-parameter to the traceRayEXT function, we could cast rays into
-multiple Acceleration Structures in the same shader.
-rayFlags is a bit mask that determines which geometry is going to
-trigger a callback to our shaders. In this case, we are only interested in
-geometry that has the opaque flag.
-cullMask is used to match only the entries in the AS that have the same
-mask value defined. This allows us to define a single AS that can be
-used for multiple purposes.
-Finally, the payload determines the location index of the ray tracing
-payload we have defined here. This allows us to invoke traceRayEXT
-multiple times, with each invocation using a different payload variable.
-The other fields are self-explanatory or have been explained previously.
-Next, we are going to have a better look at how ray directions are
-computed:
-vec3 compute_ray_dir( uvec3 launchID, uvec3 launchSize) {
-Ray tracing shaders are very similar to compute shaders, and, like
-compute shaders, each invocation has an ID. For a ray tracing shader
-this is defined in the gl_LaunchIDEXT variable. Likewise,
-gl_LaunchSizeEXT defines the total invocation size. This is akin to the
-workgroup size for compute shaders.
-In our case, we have one invocation per pixel in the image. We compute
-x and y in normalized device coordinates (NDCs) as follows:
+第一个参数为要遍历的 TLAS；作为 `traceRayEXT` 的参数，同一 shader 中可向多个加速结构发射射线。`rayFlags` 为位掩码，决定哪些几何会触发我们的 shader；此处仅关心带 opaque 标志的几何。`cullMask` 用于只匹配 AS 中具有相同 mask 的条目，从而一个 AS 可多用途使用。最后的 payload 指定此处定义的光追 payload 的 location 索引，便于多次调用 `traceRayEXT` 且每次使用不同 payload。其余参数含义明确或已说明。下面看射线方向如何计算。光追 shader 与 compute 类似，每次调用有 ID（`gl_LaunchIDEXT`），`gl_LaunchSizeEXT` 为总调用规模，类似 compute 的 workgroup 大小。本例每像素一次调用，在 NDC 中计算 x、y 如下：
 float x = ( 2 * ( float( launchID.x ) + 0.5 ) / float(
 launchSize.x ) - 1.0 );
 float y = ( 1.0 - 2 * ( float( launchID.y ) + 0.5 ) /
 float( launchSize.y ) );
-Notice that we have to invert y, as otherwise, our final image will be
-upside-down.
-Finally, we compute our world space direction by multiplying the
-coordinates by the inverse_view_projection matrix:
+注意 y 需取反，否则图像会上下颠倒。最后用 `inverse_view_projection` 矩阵乘坐标得到世界空间方向：
 vec4 dir = inverse_view_projection * vec4( x, y, 1, 1 );
 dir = normalize( dir );
 return dir.xyz;
 }
-Once traceRayEXT returns, the payload variable will contain the value
-computed through the other shaders. The final step of the ray
-generation is to save the color for this pixel:
+`traceRayEXT` 返回后，payload 中为其它 shader 计算的结果。ray generation 的最后一步是将该像素颜色写入：
 imageStore( global_images_2d[ out_image_index ], ivec2(
 gl_LaunchIDEXT.xy ), payload );
-We are now going to have a look at an example of a closest hit shader:
-layout( location = 0 ) rayPayloadInEXT vec4 payload;
-void main() {
-payload = vec4( 1.0, 0.0, 0.0, 1.0 );
-}
-The main difference from the ray generation shader is that the payload
-is now defined with the rayPayloadInEXT qualifier. It’s also important
-that the location matches the one defined in the ray generation shader.
-The miss shader is identical, except we use a different color to
-distinguish between the two.
-Now that we have defined our shader code, we can start building our
-pipeline. Compiling ray tracing shader modules works in the same way
-as other shaders. The main difference is the shader type. For ray
-tracing, these enumerations have been added:
+下面看 closest hit shader 示例：payload 改用 `rayPayloadInEXT` 限定符，且 location 须与 ray generation 中一致。Miss shader 结构相同，仅用不同颜色区分。有了 shader 代码后即可构建 pipeline。光追 shader 模块的编译方式与其它 shader 相同，区别在于 shader 类型；光追新增了下列 stage：
 • VK_SHADER_STAGE_RAYGEN_BIT_KHR
 • VK_SHADER_STAGE_ANY_HIT_BIT_KHR
 • VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
 • VK_SHADER_STAGE_MISS_BIT_KHR
 • VK_SHADER_STAGE_INTERSECTION_BIT_KHR
 • VK_SHADER_STAGE_CALLABLE_BIT_KHR
-For a ray tracing pipeline, we have to populate a new
-VkRayTracingShaderGroupCreateInfoKHR structure:
+光追 pipeline 需填充 `VkRayTracingShaderGroupCreateInfoKHR`：
 shader_group_info.sType =
 VK_STRUCTURE_TYPE_RAY_TRACING_SHADER
 _GROUP_CREATE_INFO_KHR;
@@ -442,21 +230,12 @@ shader_group_info.closestHitShader = VK_SHADER_UNUSED_KHR;
 shader_group_info.anyHitShader = VK_SHADER_UNUSED_KHR;
 shader_group_info.intersectionShader =
 VK_SHADER_UNUSED_KHR;
-In this example, we are defining a general shader, which can be a
-generation, miss, or callable shader. In our case, we are defining our ray
-generation shader. As you can see, it’s also possible to define other
-shaders within the same group entry. We have decided to have
-individual entries for each shader type as it allows us more flexibility in
-building our shader binding table.
-Other shader types are defined similarly, and we are not going to repeat
-them here. As a quick example, here is how we define a closest hit
-shader:
+本例定义的是 general shader（可为 ray generation、miss 或 callable）；这里即 ray generation。同一 group 条目内也可定义其它 shader；我们选择每种类型单独一条目以便更灵活地构建 shader binding table。其它 shader 类型定义方式类似；以 closest hit 为例：
 shader_group_info.type =
 VK_RAY_TRACING_SHADER_GROUP_TYPE
 _TRIANGLES_HIT_GROUP_KHR;
 shader_group_info.closestHitShader = stage_index;
-Now that we have our shader groups defined, we can create our
-pipeline object:
+定义好 shader group 后创建 pipeline 对象：
 VkRayTracingPipelineCreateInfoKHR pipeline_info{
 VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR };
 pipeline_info.stageCount = shader_state_data->
@@ -475,25 +254,12 @@ vulkan_allocation_callbacks, &pipeline->vk_pipeline );
 pipeline->vk_bind_point =
 VkPipelineBindPoint::VK_PIPELINE
 _BIND_POINT_RAY_TRACING_KHR;
-Notice the maxPipelineRayRecursionDepth field. It determines the
-maximum number of call stacks in case we have a recursive call to the
-rayTraceEXT function. This is needed by the compiler to determine
-how much memory could be used by this pipeline at runtime.
-We have omitted the pLibraryInfo and pLibraryInterface fields, as we
-are not using them. Multiple ray tracing pipelines can be combined to
-create a larger program, similar to how you link multiple objects in C+
-+. This can help reduce compile times for ray tracing pipelines, as
-individual components need to be compiled only once.
-The last step is to create our shader binding table. We start by
-computing the size required for our table:
+注意 `maxPipelineRayRecursionDepth`：它限定对 `traceRayEXT` 的递归调用最大深度，编译器据此估算 pipeline 运行时内存。我们未使用 `pLibraryInfo` 与 `pLibraryInterface`；多个光追 pipeline 可像 C++ 链接多目标文件一样组合成更大程序，有助于减少编译时间。最后一步是创建 shader binding table，先计算表所需大小：
 u32 group_handle_size =
 ray_tracing_pipeline_properties.shaderGroupHandleSize;
 sizet shader_binding_table_size = group_handle_size *
 shader_state_data->active_shaders;
-We simply multiply the handle size by the number of entries in our
-table.
-Next, we call vkGetRayTracingShaderGroupHandlesKHR to get the
-handles of the groups in the ray tracing pipeline:
+即句柄大小乘以表条目数。接着调用 `vkGetRayTracingShaderGroupHandlesKHR` 获取 pipeline 中各 group 的句柄：
 Array<u8> shader_binding_table_data{ };
 shader_binding_table_data.init( allocator,
 shader_binding_table_size, shader_binding_table_size );
@@ -501,9 +267,7 @@ vkGetRayTracingShaderGroupHandlesKHR( vulkan_device,
 pipeline->vk_pipeline, 0, shader_state_data->
 active_shaders, shader_binding_table_size,
 shader_binding_table_data.data );
-Once we have the shader group handles, we can combine them to create
-individual tables for each shader type. They are stored in separate
-buffers:
+拿到 shader group 句柄后，按 shader 类型分别建表并存入不同 buffer：
 BufferCreation shader_binding_table_creation{ };
 shader_binding_table_creation.set(
 VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
@@ -523,12 +287,7 @@ shader_binding_table_data.data + ( group_handle_size *
 2 ) ).set_name( "shader_binding_table_miss" );
 pipeline->shader_binding_table_miss = create_buffer(
 shader_binding_table_creation );
-We only have one entry per table, so we simply copy each group handle
-into its buffer. Notice that the buffer has to be created with the
-VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR usage flag.
-This completes our ray tracing pipeline creation. All that’s left is to
-actually use it to generate an image! This is accomplished by the
-following code:
+每表仅一条目，故将各 group 句柄拷入对应 buffer。Buffer 须带 `VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR`。光追 pipeline 创建至此完成，最后用其生成图像：
 u32 shader_group_handle_size = gpu_device->
 ray_tracing_pipeline_properties.shaderGroupHandleSize;
 VkStridedDeviceAddressRegionKHR raygen_table{ };
@@ -549,61 +308,20 @@ VkStridedDeviceAddressRegionKHR callable_table{ };
 vkCmdTraceRaysKHR( vk_command_buffer, &raygen_table,
 &miss_table, &hit_table, &callable_table, width,
 height, depth );
-We define VkStridedDeviceAddressRegionKHR for each shader
-binding table. We use the table buffers we previously created. Notice
-that we still need to define a table for callable shaders, even if we are
-not using them. The width, height, and depth parameters determine
-the invocation size of our ray tracing shader.
-In this section, we have illustrated how to create and use a ray tracing
-pipeline. We started by defining the organization of our shader binding
-table. Next, we looked at a basic ray generation and closest hit shader.
-We then showed how to create a ray tracing pipeline object and how to
-retrieve shader group handles.
-These handles were then used to populate the buffers of our shader
-binding tables. Finally, we demonstrated how to combine all these
-components to invoke our ray tracing pipeline.
-Summary
-In this chapter, we have provided the details on how to use ray tracing
-in Vulkan. We started by explaining two fundamental concepts:
-• Acceleration Structures: These are needed to speed up scene
-traversal. This is essential to achieve real-time results.
-• Shader binding tables: Ray tracing pipelines can invoke multiple
-shaders, and these tables are used to tell the API which shaders to
-use for which stage.
-In the next section, we provided the implementation details to create
-TLASes and BLASes. We first record the list of geometries that compose
-our mesh. Next, we use this list to create a BLAS. Each BLAS can then
-be instanced multiple times within a TLAS, as each BLAS instance
-defines its own transform. With this data, we can then create our TLAS.
-In the third and final section, we explained how to create a ray tracing
-pipeline. We started with the creation of individual shader types. Next,
-we demonstrated how to combine these individual shaders into a ray
-tracing pipeline and how to generate a shader binding table from a
-given pipeline.
-Next, we have shown how to write a simple ray generation shader used
-in combination with a closest hit shader and a miss shader. Finally, we
-demonstrate how to combine all these pieces to trace rays in our scene.
-In the next chapter, we are going to leverage all the knowledge from
-this chapter to implement ray-traced shadows!
-Further reading
-As always, we have only provided the most relevant details on how to
-use the Vulkan API. We recommend you read the Vulkan specification
-for more details. Here is the list of the most relevant sections:
-• https://registry.khronos.org/vulkan/specs/1.3-extensions/html/
-vkspec.html#pipelines-ray-tracing
-• https://registry.khronos.org/vulkan/specs/1.3-extensions/html/
-vkspec.html#interfaces-raypipeline
-• https://registry.khronos.org/vulkan/specs/1.3-extensions/html/
-vkspec.html#acceleration-structure
-• https://registry.khronos.org/vulkan/specs/1.3-extensions/html/
-vkspec.html#ray-tracing
-This website provides more details on Acceleration Structures: https://
-www.scratchapixel.com/lessons/3d-basic-rendering/introduction-
-acceleration-structure/introduction.
-There are plenty of resources online about real-time ray tracing. It’s still
-a novel field and subject to ongoing research. A good starting point is
-provided by these two freely available books:
-• http://www.realtimerendering.com/raytracinggems/rtg/
-index.html
-• http://www.realtimerendering.com/raytracinggems/rtg2/
-index.html
+为每种 shader binding table 定义 `VkStridedDeviceAddressRegionKHR`，使用之前创建的表 buffer。即使不用 callable，也需为其提供表。width、height、depth 决定光追 shader 的调用规模。本节说明了如何创建与使用光追 pipeline：先定义 shader binding table 的组织，再看基础 ray generation 与 closest hit shader，然后创建 pipeline 并获取 shader group 句柄，用其填充各表 buffer，最后组合调用光追管线。
+
+## 小结（Summary）
+
+本章介绍了在 Vulkan 中使用光追的要点。先说明两个基础概念：**加速结构**——加速场景遍历，对实时光追至关重要；**Shader binding table**——光追管线可调用多种 shader，表用来指定各阶段使用的 shader。接着给出创建 TLAS 与 BLAS 的实现：先记录组成 mesh 的几何列表，用其创建 BLAS，每个 BLAS 可在 TLAS 中多次实例化（每实例自有变换），再创建 TLAS。第三节说明如何创建光追 pipeline：从各 shader 类型到组合成 pipeline、从 pipeline 生成 shader binding table，并给出了与 closest hit、miss 配合的简单 ray generation shader，以及如何组合这些部分在场景中追踪射线。下一章将用本章知识实现光追阴影。
+
+## 延伸阅读（Further reading）
+
+仅给出 Vulkan API 最相关部分，更多细节请阅规范：
+- https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#pipelines-ray-tracing
+- https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#interfaces-raypipeline
+- https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#acceleration-structure
+- https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#ray-tracing
+加速结构入门：https://www.scratchapixel.com/lessons/3d-basic-rendering/introduction-acceleration-structure/introduction
+实时光追资料很多，仍属较新领域。可参考两本免费书：
+- http://www.realtimerendering.com/raytracinggems/rtg/index.html
+- http://www.realtimerendering.com/raytracinggems/rtg2/index.html
