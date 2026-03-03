@@ -1,973 +1,275 @@
-# Chapter 3: Unlocking Multi-Threading
+# 第 3 章：解锁多线程
 
-# 3
+本章介绍如何为 Raptor Engine 加入多线程。这既需要底层架构的较大调整，也需要一些 Vulkan 特有的改动与同步，以便 CPU 与 GPU 的多核以正确且高效的方式协作。
 
+多线程渲染是多年来反复出现的主题，自多核架构普及以来，多数游戏引擎都离不开它。PlayStation 2、世嘉土星等主机早已提供多线程支持，后续世代则通过更多核心延续这一趋势。
 
+游戏引擎中多线程渲染的早期实践可追溯到 2008 年 Christer Ericson 的博客文章（[链接](https://realtimecollisiondetection.net/blog/?p=86)），文中说明了将用于在屏幕上绘制物体的命令生成进行并行化与优化的可行性。
 
-# Unlocking Multi-Threading
+OpenGL 以及 DirectX 11 及更早版本缺乏真正的多线程支持，尤其是它们采用全局上下文跟踪每次命令后状态变化的大状态机。即便如此，不同对象的命令生成本身可能耗时数毫秒，多线程在当时已是可观的性能收益。
 
+好在 Vulkan 从 API 设计上就原生支持多线程命令缓冲，尤其是 VkCommandBuffer 的创建与使用。Raptor Engine 此前是单线程应用，要完整支持多线程需要一定的架构改动。本章将介绍这些改动、如何使用基于任务的多线程库 enkiTS，并实现异步资源加载与多线程命令录制。
 
-In this chapter, we will talk about adding multi-threading to the Raptor Engine.
+本章将涵盖：
 
-This requires both a big change in the underlying architecture and some Vulkan-specific changes and synchronization work so that the different cores of the CPU and the GPU can cooperate in the most correct and the fastest way.
+- 如何使用基于任务的多线程库
+- 如何异步加载资源
+- 如何在多线程中并行绘制
 
-**Multi-threading** rendering is a topic covered many times over the years and a feature that most game engines have needed since the era of multi-core architectures exploded. Consoles such as the PlayStation 2 and the Sega Saturn already offered multi-threading support, and later generations continued the trend by providing an increasing number of cores that developers could take advantage of.
+学完本章后，你将掌握如何并发执行资源加载与屏幕绘制的任务；理解基于任务的多线程模型后，也便于在后续章节中完成其他并行工作。
 
-The first trace of multi-threading rendering in a game engine is as far back as 2008 when Christer Ericson wrote a blog post ([https://realtimecollisiondetection.net/blog/?p=86](https://realtimecollisiondetection.net/blog/?p=86)) and showed that it was possible to parallelize and optimize the generation of commands used to render objects on the screen.
+## 技术需求
 
-Older APIs such as OpenGL and DirectX (up until version 11) did not have proper multi-threading support, especially because they were big state machines with a global context tracking down each change after each command. Still, the command generation across different objects could take a few milliseconds, so multi-threading was already a big save in performance.
+本章代码可在以下地址获取：[Mastering-Graphics-Programming-with-Vulkan/source/chapter3](https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter3)。
 
-Luckily for us, Vulkan fully supports multi-threading command buffers natively, especially with the creation of the **VkCommandBuffer** class, from an architectural perspective of the Vulkan API.
+## 使用 enkiTS 的基于任务的多线程
+要实现并行，需要先理解本章架构所依赖的一些基本概念与选择。首先，在软件工程里“并行”指的是让多段代码同时执行。现代硬件有可独立运作的单元，操作系统则提供称为线程的执行单元。
 
-The Raptor Engine, up until now, was a single-threaded application and thus required some architectural changes to fully support multi-threading. In this chapter, we will see those changes, learn how to use a task-based multi-threading library called enkiTS, and then unlock both asynchronous resource loading and multi-threading command recording.
+一种常见做法是以**任务（task）**为单位：小的、可被任意线程执行的独立工作单元。
 
-本章将涉及以下主题：
+### 为何采用基于任务的并行？
 
-- How to use a task-based multi-threading library
+多线程并非新话题，自其被引入各类游戏引擎以来就有多种实现方式。游戏引擎要尽可能高效地利用硬件，因此也推动了更优的软件架构。
 
+早期做法是为每种工作开专用线程——例如单独渲染线程、异步 I/O 线程等。这在双核时代能增加可并行粒度，但很快成为瓶颈。于是需要更“与核心无关”地使用 CPU，让几乎任意核心都能执行任意类型工作，从而催生了**基于任务**与**基于纤程（fiber）**两种架构。
 
-- How to asynchronously load resources
+基于任务的并行通过向多个线程分发任务、并用依赖关系编排它们来实现。任务与平台无关且不可被抢占，调度与组织代码更直观。纤程则类似任务，但 heavily 依赖调度器在适当时机中断与恢复，编写正确的纤程系统较难，容易产生隐蔽错误。
 
+鉴于任务比纤程更易用、且实现基于任务并行的库更多，我们选用 **enkiTS** 处理多线程。若想深入理解这两种架构，可参考相关演讲：基于任务的例子如《命运》系列引擎（[Destiny's Multithreaded Rendering](https://www.gdcvault.com/play/1021926/Destiny-s-Multithreaded-Rendering)），基于纤程的如顽皮狗引擎（[Parallelizing the Naughty Dog Engine](https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine)）。
 
-- How to draw in parallel threads
+### 使用 enkiTS（Task-Scheduler）库
 
+基于任务的多线程以“任务”为核心：任务是在 CPU 任意核心上可执行的独立工作单元。需要**调度器**协调任务并处理依赖。任务可有一个或多个依赖，从而只在某些任务完成后才被调度执行。这样我们可以在任意时刻提交任务，通过依赖形成图式执行；若设计得当，各核心可被充分利用。
 
+调度器负责检查依赖与优先级、按需调度或移除任务，是加入 Raptor Engine 的新系统。初始化时库会创建若干线程，每个等待执行任务。任务加入后被放入队列；当调度器执行待处理任务时，各线程按依赖与优先级从队列取下一个可用任务并执行。注意：正在运行的任务可以再派发新任务，新任务会进入该线程的本地队列，但若其他线程空闲可被“偷走”——即 **work-stealing** 队列。
 
-
-学完本章后，我们将know how to run concurrent tasks both for loading resources and drawing objects on the screen. By learning how to reason with a task-based multi-threading system, we will be able to perform other parallel tasks in future chapters as well.
-
-# 技术需求
-本章代码见以下链接： [https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter3](https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter3).
-
-# Task-based multi-threading using enkiTS
-
-
-To achieve parallelism, we need to understand some basic concepts and choices that led to the architecture developed in this chapter. First, we should note that when we talk about parallelism in software engineering, we mean the act of executing chunks of code at the same time.
-
-This is possible because modern hardware has different units that can be operated independently, and operating systems have dedicated execution units called **threads**.
-
-A common way to achieve parallelism is to reason with tasks – small independent execution units that can run on any thread.
-
-## Why task-based parallelism?
-
-
-Multi-threading is not a new subject, and since the early years of it being added to various game engines, there have been different ways of implementing it. Game engines are pieces of software that use all of the hardware available in the most efficient way, thus paving the way for more optimized software architectures.
-
-Therefore, we’ll take some ideas from game engines and gaming-related presentations. The initial implementations started by adding a thread with a single job to do – something specific, such as rendering a single thread, an asynchronous **input/output** (**I/O**) thread, and so on.
-
-This helped add more granularity to what could be done in parallel, and it was perfect for the older CPUs (having two cores only), but it soon became limiting.
-
-There was the need to use cores in a more agnostic way so that any type of job could be done by almost any core and to improve performance. This gave way to the emergence of two new architectures: **task-based** and **fiber-based** architectures.
-
-Task-based parallelism is achieved by feeding multiple threads with different tasks and orchestrating them through dependencies. Tasks are inherently platform agnostic and cannot be interrupted, leading to a more straightforward capability to schedule and organize code to be executed with them.
-
-On the other hand, fibers are software constructs similar to tasks, but they rely heavily on the scheduler to interrupt their flow and resume when needed. This main difference makes it hard to write a proper fiber system and normally leads to a lot of subtle errors.
-
-For the simplicity of using tasks over fibers and the bigger availability of libraries implementing task-based parallelism, the enkiTS library was chosen to handle everything. For those curious about more in-depth explanations, there are a couple of great presentations about these architectures.
-
-A great example of a task-based engine is the one behind the Destiny franchise (with an in-depth architecture you can view at [https://www.gdcvault.com/play/1021926/Destiny-s-Multithreaded-Rendering](https://www.gdcvault.com/play/1021926/Destiny-s-Multithreaded-Rendering)), while a fiber-based one is used by the game studio Naughty Dog for their games (there is a presentation about it at [https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine](https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine)).
-
-## Using the enkiTS (Task-Scheduler) library
-
-
-Task-based multi-threading is based on the concept of a task, defined as a *unit of independent work that can be executed on any core of **a CPU*.
-
-To do that, there is a need for a scheduler to coordinate different tasks and take care of the possible dependencies between them. Another interesting aspect of a task is that it could have one or more dependencies so that it could be scheduled to run only after certain tasks finish their execution.
-
-This means that tasks can be submitted to the scheduler at any time, and with proper dependencies, we create a graph-based execution of the engine. If done properly, each core can be utilized fully and results in optimal performance to the engine.
-
-The scheduler is the brain behind all the tasks: it checks dependencies and priorities, and schedules or removes tasks based on need, and it is a new system added to the Raptor Engine.
-
-When initializing the scheduler, the library spawns a number of threads, each waiting to execute a task. When adding tasks to the scheduler, they are inserted into a queue. When the scheduler is told to execute pending tasks, each thread gets the next available task from the queue – according to dependency and priority – and executes it.
-
-It’s important to note that running tasks can spawn other tasks. These tasks will be added to the thread’s local queue, but they are up for grabs if another thread is idle. This implementation is called a **work-stealing queue**.
-
-Initializing the scheduler is as simple as creating a configuration and calling the **Initialize** method:
-
-```
+初始化调度器只需创建配置并调用 Initialize：
+```cpp
 enki::TaskSchedulerConfig config;
 config.numTaskThreadsToCreate = 4;
 enki::TaskScheduler task_scheduler;
 task_scheduler.Initialize( config );
 ```
 
+这样会创建 4 个工作线程。enkiTS 以 **TaskSet** 为工作单位，可用继承或 lambda 驱动执行：
 
-With this code, we are telling the task scheduler to spawn four threads that it will use to perform its duties. enkiTS uses the **TaskSet** class as a unit of work, and it uses both inheritance and lambda functions to drive the execution of tasks in the scheduler:
-
-```
-Struct ParallelTaskSet : enki::ItaskSet {
-&#160;&#160;&#160;&#160;void ExecuteRange(&#160;&#160;enki::TaskSetPartition range_,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;uint32_t threadnum_ ) override {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;// do something here, can issue tasks with
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;task_scheduler
-&#160;&#160;&#160;&#160;}
+```cpp
+struct ParallelTaskSet : enki::ITaskSet {
+    void ExecuteRange( enki::TaskSetPartition range_, uint32_t threadnum_ ) override {
+        // 在此执行逻辑，也可通过 task_scheduler 派发新任务
+    }
 };
-int main(int argc, const char * argv[]) {
-&#160;&#160;&#160;&#160;enki::TaskScheduler task_scheduler;
-&#160;&#160;&#160;&#160;task_scheduler.Initialize( config );
-&#160;&#160;&#160;&#160;ParallelTaskSet task; // default constructor has a set
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;size of 1
-&#160;&#160;&#160;&#160;task_scheduler.AddTaskSetToPipe( &task );
-&#160;&#160;&#160;&#160;// wait for task set (running tasks if they exist)
-&#160;&#160;&#160;&#160;// since we&apos;ve just added it and it has no range we&apos;ll
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;likely run it.
-&#160;&#160;&#160;&#160;Task_scheduler.WaitforTask( &task );
-&#160;&#160;&#160;&#160;return 0;
-}
+// main 中：AddTaskSetToPipe( &task ); task_scheduler.WaitforTask( &task );
 ```
 
+TaskSet 定义“任务如何执行”，具体用多少任务、在哪个线程由调度器决定。更简洁的写法是用 lambda：
 
-In this simple snippet, we see how to create an empty **TaskSet** (as the name implies, a set of tasks) that defines how a task will execute the code, leaving the scheduler with the job of deciding how many of the tasks will be needed and which thread will be used.
-
-A more streamlined version of the previous code uses lambda functions:
-
-```
-enki::TaskSet task( 1, []( enki::TaskSetPartition range_,
-&#160;&#160;uint32_t threadnum_&#160;&#160;) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;// do something here
-&#160;&#160;}&#160;&#160;);
+```cpp
+enki::TaskSet task( 1, []( enki::TaskSetPartition range_, uint32_t threadnum_ ) {
+    // 在此执行
+} );
 task_scheduler.AddTaskSetToPipe( &task );
 ```
 
+enkiTS 还支持 **pinned task**：绑定到某一线程、始终在该线程执行的任务。下一节将用 pinned task 做异步 I/O。
 
-This version can be easier when reading the code as it does break the flow less, but it is functionally equivalent to the previous one.
+本节简要介绍了多线程的几种思路及我们选择基于任务的原因，并给出了 enkiTS 的简单用法。下一节将看到引擎中的实际应用：异步资源加载。
 
-Another feature of the enkiTS scheduler is the possibility to add pinned tasks – special tasks that will be bound to a thread and will always be executed there. We will see the use of pinned tasks in the next section to perform asynchronous I/O operations.
+## 异步加载
+资源加载往往是框架中最慢的操作之一：文件大、来源多样（光盘、硬盘甚至网络）。理解内存访问速度层级很重要：
 
-In this section, we talked briefly about the different types of multi-threading so that we could express the reason for choosing to use task-based multi-threading. We then showed some simple examples of the enkiTS library and its usage, adding multi-threading capabilities to the Raptor Engine.
+![image-20260303161732520](./image-20260303161732520.png)
 
-下一节将finally see a real use case in the engine, which is the asynchronous loading of resources.
+*图 3.1 – 内存层级*
 
-# Asynchronous loading
+最快的是寄存器，其次是多级缓存；它们都在处理单元内（CPU 与 GPU 各有寄存器和缓存）。主存（RAM）是应用常用数据的所在，比缓存慢，但是代码能直接访问、因此是加载操作的目标。再往下是硬盘与光驱——更慢但容量大，通常存放要载入主存的资源。远程存储（如服务器）最慢，本章不涉及，但可用于带在线服务的应用（如多人游戏）。
 
+为优化读取，我们要把所需数据都迁入主存（无法直接操控缓存和寄存器）。要掩盖磁盘与光驱的慢速，关键手段之一就是**并行化**来自各种介质的资源加载，避免拖慢应用流畅度。常见做法是专设一个线程只负责加载并与引擎其他系统交互以更新在用资源——这也是前面提到的“线程专门化”的一种。
 
-The loading of resources is one of the (if not *the*) slowest operations that can be done in any framework. This is because the files to be loaded are big, and they can come from different sources, such as optical units (DVD and Blu-ray), hard drives, and even the network.
+下面几节将说明如何配置 enkiTS、为 Raptor Engine 创建并行任务，以及 Vulkan 队列（并行提交命令所必需），最后给出异步加载的实际代码。
 
-It is another great topic, but the most important concept to understand is the inherent speed necessary to read the memory:
+### 创建 I/O 线程与任务
+enkiTS 的 **pinned-task** 把任务绑定到指定线程，使其在该线程上持续运行，除非用户停止或该线程被更高优先级任务占用。为简化，我们增加一个专用于 I/O 的线程（`config.numTaskThreadsToCreate = 4` 等），不让主逻辑占用它，从而减少上下文切换。
 
+创建 pinned task 并绑定到线程 ID：
 
-
- ![Figure 3.1 – A memory hierarchy](image/B18395_03_01.jpg)
-
-
-Figure 3.1 – A memory hierarchy
-
-As shown in the preceding diagram, the fastest memory is the registers memory. After registers follows the cache, with different levels and access speeds: both registers and caches are directly in the processing unit (both the CPU and GPU have registers and caches, even with different underlying architectures).
-
-Main memory refers to the RAM, which is the area that is normally populated with the data used by the application. It is slower than the cache, but it is the target of the loading operations as the only one directly accessible from the code. Then there are magnetic disks (hard drives) and optical drives – much slower but with greater capacity. They normally contain the asset data that will be loaded into the main memory.
-
-The final memory is in remote storage, such as from some servers, and it is the slowest. We will not deal with that here, but it can be used when working on applications that have some form of online service, such as multiplayer games.
-
-With the objective of optimizing the read access in an application, we want to transfer all the needed data into the main memory, as we can’t interact with caches and registers. To hide the slow speed of magnetic and optical disks, one of the most important things that can be done is to parallelize the loading of any resource coming from any medium so that the fluidity of the application is not slowed down.
-
-The most common way of doing it, and one example of the thread-specialization architecture we talked briefly about before, is to have a separate thread that handles just the loading of resources and interacts with other systems to update the used resources in the engine.
-
-在以下各节中，我们将talk about how to set up enkiTS and create tasks for parallelizing the Raptor Engine, as well as talk about Vulkan queues, which are necessary for parallel command submission. Finally, we will dwell on the actual code used for asynchronous loading.
-
-## Creating the I/O thread and tasks
-
-
-In the enkiTS library, there is a feature called **pinned-task** that associates a task to a specific thread so that it is continuously running there unless stopped by the user or a higher priority task is scheduled on that thread.
-
-To simplify things, we will add a new thread and avoid it being used by the application. This thread will be mostly idle, so the context switch should be low:
-
-```
-config.numTaskThreadsToCreate = 4;
-```
-
-
-We then create a pinned task and associate it with a thread ID:
-
-```
-// Create IO threads at the end
+```cpp
 RunPinnedTaskLoopTask run_pinned_task;
-run_pinned_task.threadNum = task_scheduler.
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;GetNumTaskThreads() - 1;
+run_pinned_task.threadNum = task_scheduler.GetNumTaskThreads() - 1;
 task_scheduler.AddPinnedTask( &run_pinned_task );
 ```
 
+再创建负责异步加载的 pinned task，绑定到同一线程：
 
-At this point, we can create the actual task responsible for asynchronous loading, associating it with the same thread as the pinned task:
-
-```
-// Send async load task to external thread
+```cpp
 AsynchronousLoadTask async_load_task;
 async_load_task.threadNum = run_pinned_task.threadNum;
 task_scheduler.AddPinnedTask( &async_load_task );
 ```
 
+下面是这两个任务的具体实现。先看第一个 pinned task：
+（RunPinnedTaskLoopTask：在循环中 `WaitForNewPinnedTasks` 后 `RunPinnedTasks`，用 `execute` 标志在退出或最小化时停止。AsynchronousLoadTask：循环调用 `async_loader->update()`，使该线程专用于 I/O、不被其他任务占用。）
 
-The final piece of the puzzle is the actual code for these two tasks. First, let us have a look at the first pinned task:
+在进入 AsynchronousLoader 之前，需要理解 Vulkan 的**队列（queue）**概念及其对异步加载的意义。
 
-```
-struct RunPinnedTaskLoopTask : enki::IPinnedTask {
-&#160;&#160;&#160;&#160;void Execute() override {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;while ( task_scheduler->GetIsRunning() && execute )
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;{
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;task_scheduler->WaitForNewPinnedTasks();
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;// this thread will &apos;sleep&apos; until there are new
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;pinned tasks
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;task_scheduler->RunPinnedTasks();
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;enki::TaskScheduler*task_scheduler;
-&#160;&#160;&#160;&#160;bool execute = true;
-}; // struct RunPinnedTaskLoopTask
-```
+## Vulkan 队列与首次并行命令生成
+**队列**可理解为：把记录在 VkCommandBuffer 中的命令提交给 GPU 的入口。相对 OpenGL 这是 Vulkan 新增的概念。一次队列提交本身是单线程、相对昂贵的操作，也会成为 CPU-GPU 之间的同步点。通常引擎在 present 前向**主队列**提交命令缓冲，由 GPU 执行并得到最终画面。
 
+除了主队列还可以创建更多队列，在不同线程中使用，以增强并行。队列的详细说明见 [Vulkan-Guide/queues](https://github.com/KhronosGroup/Vulkan-Guide/blob/master/chapters/queues.adoc)。每个队列能提交的命令类型由其 flag 表示：
 
-This task will wait for any other pinned task and run them when possible. We have added an **execute** flag to stop the execution when needed, for example, when exiting the application, but it could be used in general to suspend it in other situations (such as when the application is minimized).
+- **VK_QUEUE_GRAPHICS_BIT**：可提交所有 vkCmdDraw 等绘制命令
+- **VK_QUEUE_COMPUTE_BIT**：可提交 vkCmdDispatch、vkCmdTraceRays（光线追踪）等
+- **VK_QUEUE_TRANSFER_BIT**：可提交复制命令，如 vkCmdCopyBuffer、vkCmdCopyBufferToImage、vkCmdCopyImageToBuffer
 
-The other task is the one executing the asynchronous loading using the **AsynchronousLoader** class:
+每种可用队列通过**队列族（queue family）**暴露；一个队列族可具备多种能力并包含多个队列。例如：
+（示例：第一个队列族具备 graphics/compute/transfer，queueCount=1；第二个具备 compute/transfer，queueCount=2；第三个仅 transfer，queueCount=2。GPU 保证至少有一个能提交所有类型命令的队列，即主队列。部分 GPU 还有仅带 VK_QUEUE_TRANSFER 的专用队列，可用 DMA 加速 CPU-GPU 数据传输。逻辑设备负责创建与销毁队列，一般在应用启动/关闭时进行。）
 
-```
-struct AsynchronousLoadTask : enki::IPinnedTask {
-&#160;&#160;&#160;&#160;void Execute() override {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;while ( execute ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;async_loader->update();
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;AsynchronousLoader*async_loader;
-&#160;&#160;&#160;&#160;enki::TaskScheduler*task_scheduler;
-&#160;&#160;&#160;&#160;bool execute = true;
-}; // struct AsynchronousLoadTask
-```
-
-
-The idea behind this task is to always be active and wait for requests for resource loading. The **while** loop ensures that the root pinned task never schedules other tasks on this thread, locking it to I/O as intended.
-
-Before moving on to look at the **AsynchronousLoader** class, we need to look at an important concept in Vulkan, namely queues, and why they are a great addition for asynchronous loading.
-
-## Vulkan queues and the first parallel command generation
-
-
-The concept of a *queue* – which can be defined as the entry point to submit commands recorded in **VkCommandBuffers** to the GPU – is an addition to Vulkan compared to OpenGL and needs to be taken care of.
-
-Submission using a queue is a single-threaded operation, and a costly operation that becomes a synchronization point between CPU and GPU to be aware of. Normally, there is the main queue to which the engine submits command buffers before presenting the frame. This will send the work to the GPU and create the rendered image intended.
-
-But where there is one queue, there can be more. To enhance parallel execution, we can instead create different *queues* – and use them in different threads instead of the main one.
-
-A more in-depth look at queues can be found at [https://github.com/KhronosGroup/Vulkan-Guide/blob/master/chapters/queues.adoc](https://github.com/KhronosGroup/Vulkan-Guide/blob/master/chapters/queues.adoc), but what we need to know is that each queue can submit certain types of commands, visible through a queue’s flag:
-
-- **VK_QUEUE_GRAPHICS_BIT** can submit all **vkCmdDraw** commands
-
-
-- **VK_QUEUE_COMPUTE** can submit all **vkCmdDispatch** and **vkCmdTraceRays** (used for ray tracing)
-
-
-- **VK_QUEUE_TRANSFER** can submit copy commands, such as **vkCmdCopyBuffer**, **vkCmdCopyBufferToImage**, and **vkCmdCopyImageToBuffer**
-
-
-
-
-Each available queue is exposed through a queue family. Each queue family can have multiple capabilities and can expose multiple queues. Here is an example to clarify:
-
-```
-{
-&#160;&#160;&#160;&#160;"VkQueueFamilyProperties": {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"queueFlags": [
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_GRAPHICS_BIT",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_COMPUTE_BIT",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_TRANSFER_BIT",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_SPARSE_BINDING_BIT"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;],
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"queueCount": 1,
-&#160;&#160;&#160;&#160;}
-},
-{
-&#160;&#160;&#160;&#160;"VkQueueFamilyProperties": {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"queueFlags": [
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_COMPUTE_BIT",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_TRANSFER_BIT",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_SPARSE_BINDING_BIT"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;],
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"queueCount": 2,
-&#160;&#160;&#160;&#160;}
-},
-{
-&#160;&#160;&#160;&#160;"VkQueueFamilyProperties": {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"queueFlags": [
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_TRANSFER_BIT",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"VK_QUEUE_SPARSE_BINDING_BIT"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;],
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"queueCount": 2,
-&#160;&#160;&#160;&#160;}
-}
-```
-
-
-The first queue exposes all capabilities, and we only have one of them. The next queue can be used for compute and transfer, and the third one for transfer (we’ll ignore the sparse feature for now). We have two queues for each of these families.
-
-It is guaranteed that on a GPU there will always be at least one queue that can submit all types of commands, and that will be our main queue.
-
-In some GPUs, though, there can be specialized queues that have only the **VK_QUEUE_TRANSFE**R flag activated, which means that they can use **direct memory access** (**DMA**) to speed up the transfer of data between the CPU and the GPU.
-
-One last thing: the Vulkan logical device is responsible for creating and destroying queues – an operation normally done at the startup/shutdown of the application. Let us briefly see the code to query the support for different queues:
-
-```
+查询不同队列支持的代码大致如下：
+```cpp
 u32 queue_family_count = 0;
-&#160;&#160;&#160;&#160;vkGetPhysicalDeviceQueueFamilyProperties(
-&#160;&#160;&#160;&#160;vulkan_physical_device, &queue_family_count, nullptr );
-&#160;&#160;&#160;&#160;VkQueueFamilyProperties*queue_families = (
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VkQueueFamilyProperties* )ralloca( sizeof(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VkQueueFamilyProperties ) * queue_family_count,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;temp_allocator );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;vkGetPhysicalDeviceQueueFamilyProperties(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;vulkan_physical_device, &queue_family_count,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;queue_families );
-&#160;&#160;&#160;&#160;u32 main_queue_index = u32_max, transfer_queue_index =
-&#160;&#160;&#160;&#160;u32_max;
-&#160;&#160;&#160;&#160;for ( u32 fi = 0; fi < queue_family_count; ++fi) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VkQueueFamilyProperties queue_family =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;queue_families[ fi ];
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( queue_family.queueCount == 0 ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;continue;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;// Search for main queue that should be able to do
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;all work (graphics, compute and transfer)
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( (queue_family.queueFlags & (
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_QUEUE_TRANSFER_BIT )) == (
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_QUEUE_TRANSFER_BIT ) ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;main_queue_index = fi;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;// Search for transfer queue
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( ( queue_family.queueFlags &
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_QUEUE_COMPUTE_BIT ) == 0 &&
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;(queue_family.queueFlags &
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_QUEUE_TRANSFER_BIT) ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;transfer_queue_index = fi;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;}
+vkGetPhysicalDeviceQueueFamilyProperties( vulkan_physical_device, &queue_family_count, nullptr );
+VkQueueFamilyProperties* queue_families = ...;
+vkGetPhysicalDeviceQueueFamilyProperties( vulkan_physical_device, &queue_family_count, queue_families );
+// 遍历查找同时具备 graphics|compute|transfer 的主队列、以及仅 transfer 的传输队列，记录 main_queue_index 与 transfer_queue_index
 ```
 
+得到物理设备的所有队列族后，根据 queueFlags 选出主队列与传输队列（若存在），并保存索引以便创建设备后通过 `vkGetDeviceQueue` 获取 VkQueue。若没有独立传输队列，则用主队列做传输，并需正确同步上传与图形提交。
 
-As can be seen in the preceding code, we get the list of all queues for the selected GPU, and we check the different bits that identify the types of commands that can be executed there.
+创建队列时在 VkDeviceCreateInfo 中填入 pQueueCreateInfos；设备创建后获取队列：
+（在 VkDeviceCreateInfo 中设置 queueCreateInfoCount 与 pQueueCreateInfos，调用 vkCreateDevice；再用 vkGetDeviceQueue 按 family 与索引取主队列与传输队列。）
 
-In our case, we will save the *main queue* and the *transfer queue*, if it is present on the GPU, and we will save the indices of the *queues* to retrieve the **VkQueue** after the device creation. Some devices don’t expose a separate transfer queue. In this case, we will use the main queue to perform transfer operations, and we need to make sure that access to the queue is correctly synchronized for upload and graphics submissions.
+至此主队列与传输队列就绪，可并行提交工作。我们通过专用类 **AsynchronousLoader** 在传输队列上提交复制命令而不阻塞 CPU/GPU，下一节看其实现。
 
-Let’s see how to create the *queues*:
+### AsynchronousLoader 类
 
-```
-// Queue creation
-VkDeviceQueueCreateInfo queue_info[ 2 ] = {};
-VkDeviceQueueCreateInfo& main_queue = queue_info[ 0 ];
-main_queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_CREATE_INFO;
-main_queue.queueFamilyIndex = main_queue_index;
-main_queue.queueCount = 1;
-main_queue.pQueuePriorities = queue_priority;
-if ( vulkan_transfer_queue_family < queue_family_count ) {
-&#160;&#160;&#160;&#160;VkDeviceQueueCreateInfo& transfer_queue_info =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;queue_info[ 1 ];
-&#160;&#160;&#160;&#160;transfer_queue_info.sType = VK_STRUCTURE_TYPE
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_DEVICE_QUEUE_CREATE_INFO;
-&#160;&#160;&#160;&#160;transfer_queue_info.queueFamilyIndex = transfer_queue
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_index;
-transfer_queue_info.queueCount = 1;
-transfer_queue_info.pQueuePriorities = queue_priority;
-}
-VkDeviceCreateInfo device_create_info {
-&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
-device_create_info.queueCreateInfoCount = vulkan_transfer
-&#160;&#160;&#160;&#160;_queue_family < queue_family_count ? 2 : 1;
-device_create_info.pQueueCreateInfos = queue_info;
-...
-result = vkCreateDevice( vulkan_physical_device,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&device_create_info,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;vulkan_allocation_callbacks,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&vulkan_device );
-```
+AsynchronousLoader 的职责包括：处理“从文件加载”请求、处理上传到 GPU 的传输、管理 staging buffer、在命令缓冲中填入复制命令、通知渲染器某纹理已完成传输。在具体上传代码之前，需要理解与命令池、传输队列和 staging buffer 相关的 Vulkan 用法。
 
+#### 为传输队列创建命令池
+向传输队列提交命令需要先创建与该队列关联的命令池：`queueFamilyIndex` 设为传输队列族，并设置 `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT`。从该池分配的指令缓冲才能正确提交到传输队列。然后从这些池中分配命令缓冲：
+（按帧为每个 command_pools[i] 分配 PRIMARY 级别、数量为 1 的命令缓冲。）这样即可用这些命令缓冲向传输队列提交命令。接下来使用 **staging buffer**，以便从 CPU 尽可能高效地向 GPU 传输数据。
 
-As already mentioned, **vkCreateDevice** is the command that creates *queues* by adding **pQueueCreateInfos** in the **VkDeviceCreateInfo** struct.
+#### 创建 staging buffer
 
-Once the device is created, we can query for all the queues as follows:
-
-```
-// Queue retrieval
-// Get main queue
-vkGetDeviceQueue( vulkan_device, main_queue_index, 0,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&vulkan_main_queue );
-// Get transfer queue if present
-if ( vulkan_transfer_queue_family < queue_family_count ) {
-&#160;&#160;&#160;&#160;vkGetDeviceQueue( vulkan_device, transfer_queue_index,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;0, &vulkan_transfer_queue );
-}
-```
-
-
-At this point, we have both the main and the transfer queues ready to be used to submit work in parallel.
-
-We had a look at how to submit parallel work to copy memory over the GPU without blocking either the GPU or the CPU, and we created a specific class to do that, **AsynchronousLoader**, which we will cover in the next section.
-
-## The AsynchronousLoader class
-
-
-Here, we’ll finally see the code for the class that implements asynchronous loading.
-
-The **AsynchronousLoader** class has the following responsibilities:
-
-- Process load from file requests
-
-
-- Process GPU upload transfers
-
-
-- Manage a staging buffer to handle a copy of the data
-
-
-- Enqueue the command buffers with copy commands
-
-
-- Signal to the renderer that a texture has finished a transfer
-
-
-
-
-Before focusing on the code that uploads data to the GPU, there is some Vulkan-specific code that is important to understand, relative to command pools, transfer queues, and using a staging buffer.
-
-### Creating command pools for the transfer queue
-
-
-In order to submit commands to the transfer queue, we need to create command pools that are linked to that queue:
-
-```
-for ( u32 i = 0; i < GpuDevice::k_max_frames; ++i) {
-VkCommandPoolCreateInfo cmd_pool_info = {
-&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, nullptr };
-cmd_pool_info.queueFamilyIndex = gpu->vulkan
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_transfer_queue_family;
-cmd_pool_info.flags = VK_COMMAND_POOL_CREATE_RESET
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_COMMAND_BUFFER_BIT;
-vkCreateCommandPool( gpu->vulkan_device, &cmd_pool_info,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;gpu->vulkan_allocation_callbacks,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&command_pools[i]);
-}
-```
-
-
-The important part is **queueFamilyIndex**, to link **CommandPool** to the transfer queue so that every command buffer allocated from this pool can be properly submitted to the transfer queue.
-
-Next, we will simply allocate the command buffers linked to the newly created pools:
-
-```
-for ( u32 i = 0; i < GpuDevice::k_max_frames; ++i) {
-&#160;&#160;&#160;&#160;VkCommandBufferAllocateInfo cmd = {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;nullptr };
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;cmd.commandPool = command_pools[i];
-cmd.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-cmd.commandBufferCount = 1;
-vkAllocateCommandBuffers( renderer->gpu->vulkan_device,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&cmd, &command_buffers[i].
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;vk_command_buffer );
-```
-
-
-With this setup, we are now ready to submit commands to the transfer queue using the command buffers.
-
-Next, we will have a look at the staging buffer – an addition to ensure that the transfer to the GPU is the fastest possible from the CPU.
-
-### Creating the staging buffer
-
-
-To optimally transfer data between the CPU and the GPU, there is the need to create an area of memory that can be used as a source to issue commands related to copying data to the GPU.
-
-To achieve this, we will create a staging buffer, a persistent buffer that will serve this purpose. We will see both the Raptor wrapper and the Vulkan-specific code to create a persistent staging buffer.
-
-In the following code, we will allocate a persistently mapped buffer of 64 MB:
-
-```
+在 CPU 与 GPU 之间做最优传输需要一块可作为“复制源”的内存。我们创建一块持久的 **staging buffer** 专用于此。下面分配一块 64 MB、持久映射的缓冲：
+```cpp
 BufferCreation bc;
-bc.reset().set( VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;ResourceUsageType::Stream, rmega( 64 )
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;).set_name( "staging_buffer" ).
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;set_persistent( true );
-BufferHandle staging_buffer_handle = gpu->create_buffer
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;( bc );
+bc.reset().set( VK_BUFFER_USAGE_TRANSFER_SRC_BIT, ResourceUsageType::Stream, rmega( 64 ) ).set_name( "staging_buffer" ).set_persistent( true );
+BufferHandle staging_buffer_handle = gpu->create_buffer( bc );
 ```
 
+对应 Vulkan 侧：VkBufferCreateInfo 使用 VK_BUFFER_USAGE_TRANSFER_SRC_BIT、size 为 64MB；VmaAllocationCreateInfo 使用 VMA_ALLOCATION_CREATE_MAPPED_BIT 使缓冲始终映射。vmaCreateBuffer 填写的 allocation_info.pMappedData 可赋给 buffer->mapped_data 供 CPU 写入。需要更大时可重新创建更大的 staging buffer。
 
-This translates to the following code:
+接着需要创建用于提交与同步的信号量与栅栏。
 
-```
-VkBufferCreateInfo buffer_info{
-&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-buffer_info.size = 64 * 1024 * 1024; // 64 MB
-VmaAllocationCreateInfo allocation_create_info{};
-allocation_create_info.flags = VMA_ALLOCATION_CREATE
-_STRATEGY_BEST_FIT_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-VmaAllocationInfo allocation_info{};
-check( vmaCreateBuffer( vma_allocator, &buffer_info,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&allocation_create_info, &buffer->vk_buffer,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&buffer->vma_allocation, &allocation_info ) );
-```
+#### 创建用于 GPU 同步的信号量与栅栏
 
+创建 semaphore 与 fence；**重要**：fence 需以已 signaled 状态创建（VK_FENCE_CREATE_SIGNALED_BIT），这样第一帧才能开始处理上传：
+（vkCreateSemaphore、vkCreateFence，fence 带 VK_FENCE_CREATE_SIGNALED_BIT。）
 
-This buffer will be the source of the memory transfers, and the **VMA_ALLOCATION_CREATE_MAPPED_BIT** flag ensures that it will always be mapped.
+下面进入请求处理逻辑。
 
-We can retrieve and use the pointer to the allocated data from the **allocation_info** structure, filled by **vmaCreateBuffer**:
+#### 处理文件请求
 
-```
-buffer->mapped_data = static_cast<u8*>(allocation_info.
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;pMappedData);
-```
+文件请求本身与 Vulkan 无关。我们使用 [STB 图像库](https://github.com/nothings/stb) 将纹理读入内存，再把数据与对应纹理加入上传请求，由传输队列负责从内存复制到 GPU：
+（stbi_load 读图，将 texture_data 与 load_request.texture 填入 upload_requests。）
 
+#### 处理上传请求
 
-We can now use the staging buffer for any operation to send data to the GPU, and if ever there is the need for a bigger allocation, we could recreate a new staging buffer with a bigger size.
+上传请求真正把数据传到 GPU。先等待 fence 为 signaled（因此创建时设为已 signaled）；若已 signaled 则 vkResetFences，以便提交完成后由 API 再次 signal：
+（vkGetFenceStatus 若非 VK_SUCCESS 则 return；否则 vkResetFences。）然后取一个上传请求、在 staging 中占位、用命令缓冲录制上传到 GPU 的命令：
+（取 upload_requests.back()，按对齐计算 aligned_image_size 与 current_offset，从 command_buffers[current_frame] 取 cb，begin 后调用 cb->upload_texture_data，free request.data，end。upload_texture_data 内部负责写 staging 并插入所需 barrier。）首先把数据拷入 staging：
+（memcpy 到 staging_buffer->mapped_data + offset。设置 VkBufferImageCopy 的 bufferOffset 等。插入 pre-copy 内存屏障：oldLayout UNDEFINED → newLayout VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL，dstAccessMask VK_ACCESS_TRANSFER_WRITE_BIT。参考 [Khronos 同步示例](https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples)。然后 vkCmdCopyBufferToImage。此时数据已在 GPU 上，但主队列还不能用，需要再做一次带队列族所有权转移的 post-copy 屏障。）
+（post-copy 屏障：srcQueueFamilyIndex=传输队列族，dstQueueFamilyIndex=图形队列族，oldLayout=TRANSFER_DST_OPTIMAL，newLayout=SHADER_READ_ONLY_OPTIMAL。所有权转移后，渲染器在主队列上再执行一次屏障，使新图像对着色器可读。通知渲染器“传输完成”的做法是：把纹理加入一个带互斥锁的“待更新纹理”列表。我们选择在所有渲染结束后、present 前为每个已传输纹理执行最终屏障；也可在帧开始时做。缓冲上传路径类似，书中略，代码中有。）
 
-Next, we need to see the code to create a semaphore and a fence used to submit and synchronize the CPU and GPU execution of commands.
+本节通过传输队列与独立命令缓冲实现了资源到 GPU 的异步加载，并说明了队列间所有权转移与任务调度器的初步用法。下一节将用这些知识实现多线程并行录制绘制命令。
 
-### Creating semaphores and fences for GPU synchronization
+## 在多线程上录制命令
+多线程录制命令需要每个线程至少使用不同的命令缓冲，录制后再提交到主队列。在 Vulkan 中，各类 pool 都需由用户做外部同步，因此最佳做法是**线程与 pool 一一对应**。命令缓冲从对应池分配并在其中录制；CommandPool、DescriptorSetPool、QueryPool 等一旦与线程绑定，即可在该线程内自由使用。提交到主队列的缓冲数组顺序即执行顺序，因此可在命令缓冲级别做排序。
 
+下面说明命令缓冲的**分配策略**及其对并行录制的重要性，以及 Vulkan 特有的**主/次级命令缓冲**区别。
 
-The code here is straightforward; the only important part is the creation of a signaled fence because it will let the code start to process uploads:
+### 分配策略
 
-```
-VkSemaphoreCreateInfo semaphore_info{
-&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-vkCreateSemaphore( gpu->vulkan_device, &semaphore_info,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;gpu->vulkan_allocation_callbacks,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&transfer_complete_semaphore );
-VkFenceCreateInfo fence_info{
-&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-vkCreateFence( gpu->vulkan_device, &fence_info,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;gpu->vulkan_allocation_callbacks,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&transfer_fence );
-```
+并行录制成功的关键是同时考虑**线程**与**帧**：每个线程要有专属的 pool，且该 pool 当前不能正在被 GPU 使用。一种简单策略是：设最大录制线程数为 T、最大在途帧数为 F，则分配 F×T 个命令池；用 (frame, thread) 二元组唯一对应一个池，保证同一池既不会在飞也不会被多线程同时写。这种做法偏保守、可能导致各线程工作量不均，但作为起点足以支持 Raptor Engine 的并行渲染。此外我们为每 (frame, thread) 预分配最多 5 个空命令缓冲（2 个 primary、3 个 secondary）。负责这些的是 **CommandBufferManager**，通过设备的 `get_command_buffer` 获取命令缓冲。
 
+### 命令缓冲回收
 
-Finally, we have now arrived at processing the requests.
+与分配策略配套的是回收：缓冲执行完后可复用而不是每次重新分配。我们按帧固定关联若干 CommandPool，回收时对对应池调用 **vkResetCommandPool** 而不是逐个释放缓冲，CPU 侧更高效。注意这不是释放缓冲占用的内存，而是让池重用已分配内存并把其下所有命令缓冲重置为初始状态。每帧开始时调用重置方法：
+（CommandBufferManager::reset_pools(frame_index) 内按 frame 与线程索引调用 vkResetCommandPool。池重置后即可复用其中的命令缓冲进行录制。）
 
-### Processing a file request
+### 主命令缓冲与次级命令缓冲
 
+Vulkan 中命令缓冲分为 **primary** 与 **secondary**。主命令缓冲最常用，可录制绘制、计算、复制等各类命令，但粒度较粗：至少包含一个 render pass，且单个 pass 内部无法再并行。次级命令缓冲限制更大——只能在某个 render pass 内录制绘制命令——但可用于在多个线程中并行录制同一 pass 内的多段绘制（例如 G-Buffer pass）。因此需要根据任务粒度决定用主缓冲还是次级缓冲。第 4 章《实现帧图》将说明如何用帧图决定缓冲类型与每任务的对象/ pass 数量。
 
-File requests are not specifically Vulkan-related, but it is useful to see how they are done.
+### 使用主命令缓冲绘制
+主命令缓冲是最常用、也最简单的用法：可录制任意命令，且只有主缓冲能直接提交到队列。分配时在 VkCommandBufferAllocateInfo 中使用 VK_COMMAND_BUFFER_LEVEL_PRIMARY。录制时 vkBeginCommandBuffer，绑定 pass 与管线，发 draw/copy/compute 命令，最后 vkEndCommandBuffer。提交时填充 VkSubmitInfo（commandBufferCount、pCommandBuffers），调用 vkQueueSubmit( vulkan_main_queue, 1, &submit_info, fence )。
 
-We use the STB image library ([https://github.com/nothings/stb](https://github.com/nothings/stb)) to load the texture into memory and then simply add the loaded memory and the associated texture to create an upload request. This will be responsible for copying the data from the memory to the GPU using the transfer queue:
+并行录制时只需满足两点：**禁止多线程同时录制同一 CommandPool**；**与同一 RenderPass 相关的命令只能在一个线程中录制**。若某个 pass（如 Forward 或 G-Buffer）内 draw call 很多、需要并行录制，就要用到次级命令缓冲。
 
-```
-FileLoadRequest load_request = file_load_requests.back();
-// Process request
-int x, y, comp;
-u8* texture_data = stbi_load( load_request.path, &x, &y,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&comp, 4 );
-// Signal the loader that an upload data is ready to be
-&#160;&#160;&#160;transferred to the GPU
-UploadRequest& upload_request = upload_requests.push_use();
-upload_request.data = texture_data;
-upload_request.texture = load_request.texture;
-```
+### 使用次级命令缓冲绘制
+次级命令缓冲只能针对**一个** render pass 录制，因此若多个 pass 都需要“pass 内并行”，就需要多个次级缓冲。次级缓冲不能直接提交到队列，必须通过 **vkCmdExecuteCommands** 被主缓冲“执行”；它们只继承开始录制时主缓冲已绑定的 RenderPass 与 Framebuffer，viewport、scissor 等需在次级缓冲里重新设置。
 
+步骤概述：先由主命令缓冲开始 render pass 并设置 framebuffer（vkCmdBeginRenderPass 时使用 VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS）。然后每个次级缓冲用 VkCommandBufferInheritanceInfo 指定 renderPass 与 framebuffer，VkCommandBufferBeginInfo 使用 VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT 与 pInheritanceInfo，再 vkBeginCommandBuffer。次级缓冲内需先 vkCmdSetViewport、vkCmdSetScissor，再绑定管线并 vkCmdDraw*。录制结束后 vkEndCommandBuffer，主缓冲中调用 vkCmdExecuteCommands( primary, count, secondaryBuffers ) 按顺序执行。为保证多线程录制后的顺序正确，可为每个次级缓冲赋执行索引，排序后再传给 vkCmdExecuteCommands。
+主缓冲侧：开始 render pass 时若将用次级缓冲填充，需传入 `VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS`；次级缓冲侧：用 `VkCommandBufferInheritanceInfo` 传入 renderPass 与 framebuffer，再以 `VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT` 与 pInheritanceInfo 开始录制，然后设置 viewport、scissor、绑定管线并发出 draw 命令。示例：
 
-Next, we will see how to process an upload request.
-
-### Processing an upload request
-
-
-This is the part that finally uploads the data to the GPU. First, we need to ensure that the fence is signaled to proceed, which is why we created it already signaled.
-
-If it is signaled, we can reset it so we can let the API signal it when the submission is done:
-
-```
-// Wait for transfer fence to be finished
-if ( vkGetFenceStatus( gpu->vulkan_device, transfer_fence )
-&#160;&#160;&#160;&#160;&#160;!= VK_SUCCESS ) {
-return;
-}
-// Reset if file requests are present.
-vkResetFences( gpu->vulkan_device, 1, &transfer_fence );
-```
-
-
-We then proceed to take a request, allocate memory from the staging buffer, and use a command buffer to upload the GPU:
-
-```
-// Get last request
-UploadRequest request = upload_requests.back();
-const sizet aligned_image_size = memory_align(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;texture->width *
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;texture->height *
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;k_texture_channels,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;k_texture_alignment );
-// Request place in buffer
-const sizet current_offset = staging_buffer_offset +
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;aligned_image_size;
-CommandBuffer* cb = &command_buffers[ gpu->current_frame ;
-cb->begin();
-cb->upload_texture_data( texture->handle, request.data,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;staging_buffer->handle,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;current_offset );
-free( request.data );
-cb->end();
-```
-
-
-The **upload_texture_data** method is the one that takes care of uploading data and adding the needed barriers. This can be tricky, so we’ve included the code to show how it can be done.
-
-First, we need to copy the data to the staging buffer:
-
-```
-// Copy buffer_data to staging buffer
-memcpy( staging_buffer->mapped_data +
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;staging_buffer_offset, texture_data,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;static_cast< size_t >( image_size ) );
-```
-
-
-Then we can prepare a copy, in this case, from the staging buffer to an image. Here, it is important to specify the offset into the staging buffer:
-
-```
-VkBufferImageCopy region = {};
-region.bufferOffset = staging_buffer_offset;
-region.bufferRowLength = 0;
-region.bufferImageHeight = 0;
-```
-
-
-We then proceed with adding a precopy memory barrier to perform a layout transition and specify that the data is using the transfer queue.
-
-This uses the code suggested in the synchronization examples provided by the Khronos Group ([https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples](https://github.com/KhronosGroup/Vulkan-Docs/wiki/Synchronization-Examples)).
-
-Once again, we show the raw Vulkan code that is simplified with some utility functions, highlighting the important lines:
-
-```
-// Pre copy memory barrier to perform layout transition
-VkImageMemoryBarrier preCopyMemoryBarrier;
-...
-.srcAccessMask = 0,
-.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-.image = image,
-.subresourceRange = ... };
-...
-```
-
-
-The texture is now ready to be copied to the GPU:
-
-```
-// Copy from the staging buffer to the image
-vkCmdCopyBufferToImage( vk_command_buffer,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;staging_buffer->vk_buffer,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;texture->vk_image,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_IMAGE_LAYOUT_TRANSFER_DST
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_OPTIMAL, 1, &region );
-```
-
-
-The texture is now on the GPU, but it is still not usable from the main queue.
-
-That is why we need another memory barrier that will also transfer ownership:
-
-```
-// Post copy memory barrier
-VkImageMemoryBarrier postCopyTransferMemoryBarrier = {
-...
-.srcAccessMask = VK_ACCESS_TRANFER_WRITE_BIT,
-.dstAccessMask = 0,
-.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-.srcQueueFamilyIndex = transferQueueFamilyIndex,
-.dstQueueFamilyIndex = graphicsQueueFamilyIndex,
-.image = image,
-.subresourceRange = ... };
-```
-
-
-Once the ownership is transferred, a final barrier is needed to ensure that the transfer is complete and the texture can be read from the shaders, but this will be done by the renderer because it needs to use the main queue.
-
-### Signaling the renderer of the finished transfer
-
-
-The signaling is implemented by simply adding the texture to a mutexed list of textures to update so that it is thread safe.
-
-At this point, we need to perform a final barrier for each transferred texture. We opted to add these barriers after all the rendering is done and before the present step, but it could also be done at the beginning of the frame.
-
-As stated before, one last barrier is needed to signal that the newly updated image is ready to be read by shaders and that all the writing operations are done:
-
-```
-VkImageMemoryBarrier postCopyGraphicsMemoryBarrier = {
-...
-.srcAccessMask = 0,
-.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-.srcQueueFamilyIndex = transferQueueFamilyIndex,
-.dstQueueFamilyIndex = graphicsQueueFamilyIndex,
-.image = image,
-.subresourceRange = ... };
-```
-
-
-We are now ready to use the texture on the GPU in our shaders, and the asynchronous loading is working. A very similar path is created for uploading buffers and thus will be omitted from the book but present in the code.
-
-In this section, we saw how to unlock the asynchronous loading of resources to the GPU by using a transfer queue and different command buffers. We also showed how to manage ownership transfer between queues. Then, we finally saw the first steps in setting up tasks with the task scheduler, which is used to add multi-threading capabilities to the Raptor Engine.
-
-下一节将use the acquired knowledge to add the parallel recording of commands to draw objects on the screen.
-
-# Recording commands on multiple threads
-
-
-To record commands using multiple threads, it is necessary to use different command buffers, at least one on each thread, to record the commands and then submit them to the main queue. To be more precise, in Vulkan, any kind of pool needs to be externally synchronized by the user; thus, the best option is to have an association between a thread and a pool.
-
-In the case of command buffers, they are allocated from the associated pool and commands registered in it. Pools can be **CommandPools**, **DescriptorSetPools**, and **QueryPools** (for time and occlusion queries), and once associated with a thread, they can be used freely inside that thread of execution.
-
-The execution order of the command buffers is based on the order of the array submitted to the main queue – thus, from a Vulkan perspective, sorting can be performed on a command buffer level.
-
-We will see how important the allocation strategy for command buffers is and how easy it is to draw in parallel once the allocation is in place. We will also talk about the different types of command buffers, a unique feature of Vulkan.
-
-## The allocation strategy
-
-
-The success in recording commands in parallel is achieved by taking into consideration both thread access and frame access. When creating command pools, not only does each thread need a unique pool to allocate command buffers and commands from, but it also needs to not be in flight in the GPU.
-
-A simple allocation strategy is to decide the maximum number of threads (we will call them **T**) that will record commands and the max number of frames (we will call them **F**) that can be in flight, then allocate command pools that are **F * ****T**.
-
-For each task that wants to render, using the pair frame-thread ID, we will guarantee that no pool will be either in flight or used by another thread.
-
-This is a very conservative approach and can lead to unbalanced command generations, but it can be a great starting point and, in our case, enough to provide support for parallel rendering to the Raptor Engine.
-
-In addition, we will allocate a maximum of five empty command buffers, two primary and three secondary, so that more tasks can execute chunks of rendering in parallel.
-
-The class responsible for this is the **CommandBufferManager** class, accessible from the device, and it gives the user the possibility to request a command buffer through the **get_command_buffer** method.
-
-下一节将see the difference between primary and secondary command buffers, which are necessary to decide the granularity of the tasks to draw the frame in parallel.
-
-## Command buffer recycling
-
-
-Linked to the allocation strategy is the recycling of the buffers. When a buffer has been executed, it can be reused to record new commands instead of always allocating new ones.
-
-Thanks to the allocation strategy we chose, we associate a fixed amount of **CommandPools** to each frame, and thus to reuse the command buffers, we will reset its corresponding **CommandPool** instead of manually freeing buffers: this has been proven to be much more efficient on CPU time.
-
-Note that we are not freeing the memory associated with the buffer, but we give **CommandPool** the freedom to reuse the total memory allocated between the command buffers that will be recorded, and it will reset all the states of all its command buffers to their initial state.
-
-At the beginning of each frame, we call a simple method to reset pools:
-
-```
-void CommandBufferManager::reset_pools( u32 frame_index ) {
-&#160;&#160;&#160;&#160;for ( u32 i = 0; i < num_pools_per_frame; i++ ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;const u32 pool_index = pool_from_indices(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;frame_index, i );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;vkResetCommandPool( gpu->vulkan_device,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;vulkan_command_pools[
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;pool_index ], 0 );
-&#160;&#160;&#160;&#160;}
-}
-```
-
-
-There is a utility method to calculate the pool index, based on the thread and frame.
-
-After the reset of the pools, we can reuse the command buffers to record commands without needing to explicitly do so for each command.
-
-We can finally have a look at the different types of command buffers.
-
-## Primary versus secondary command buffers
-
-
-The Vulkan API has a unique difference in what command buffers can do: a command buffer can either be primary or secondary.
-
-Primary command buffers are the most used ones and can perform any of the commands – drawing, compute, or copy commands, but their granularity is pretty coarse – at least one render pass must be used, and no pass can be further parallelized.
-
-Secondary command buffers are much more limited – they can actually only execute draw commands within a render pass – but they can be used to parallelize the rendering of render passes that contain many draw calls (such as a G-Buffer render pass).
-
-It is paramount then to make an informed decision about the granularity of the tasks, and especially important is to understand when to record using a primary or secondary buffer.
-
-In [*Chapter 4*](B18395_04.xhtml#_idTextAnchor064), *Implementing a Frame Graph*, we will see how a graph of the frame can give enough information to decide which command buffer type to use and how many objects and render passes should be used in a task.
-
-下一节将see how to use both primary and secondary command buffers.
-
-## Drawing using primary command buffers
-
-
-Drawing using primary command buffers is the most common way of using Vulkan and also the simplest. A primary command buffer, as already stated before, can execute any kind of command with no limitation, and it is the only one that can be submitted to a queue to be executed on the GPU.
-
-Creating a primary command buffer is simply a matter of using **VK_COMMAND_BUFFER_LEVEL_PRIMARY** in the **VkCommandBufferAllocateInfo** structure passed to the **vkAllocateCommandBuffers** function.
-
-Once created, at any time, we can begin the commands recording (with the **vkBeginCommandBuffer** function), bind passes and pipelines, and issue draw commands, copy commands, and compute ones.
-
-Once the recording is finished, the **vkEndCommandBuffer** function must be used to signal the end of recording and prepare the buffer to be ready to be submitted to a queue:
-
-```
-VkSubmitInfo submit_info = {
-&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_SUBMIT_INFO };
-submit_info.commandBufferCount = num_queued_command
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_buffers;
-submit_info.pCommandBuffers = enqueued_command_buffers;
-...
-vkQueueSubmit( vulkan_main_queue, 1, &submit_info,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;*render_complete_fence );
-```
-
-
-To record commands in parallel, there are only two conditions that must be respected by the recording threads:
-
-- Simultaneous recording on the same **CommandPool** is forbidden
-
-
-- Commands relative to **RenderPass** can only be executed in one thread
-
-
-
-
-What happens if a pass (such as a Forward or G-Buffer typical pass) contains a lot of draw-calls, thus requiring parallel rendering? This is where secondary command buffers can be useful.
-
-## Drawing using secondary command buffers
-
-
-Secondary command buffers have a very specific set of conditions to be used – they can record commands relative to only one render pass.
-
-That is why it is important to allow the user to record more than one secondary command buffer: it could be possible that more than one pass needs per-pass parallelism, and thus more than one secondary command buffer is needed.
-
-Secondary buffers always need a primary buffer and can’t be submitted directly to any queue: they must be copied into the primary buffer and inherit only **RenderPass** and **FrameBuffers** set when beginning to record commands.
-
-Let’s have a look at the different steps involving the usage of secondary command buffers. First, we need to have a primary command buffer that needs to set up a render pass and frame buffer to be rendered into, as this is absolutely necessary because no secondary command buffer can be submitted to a queue or set **RenderPass** or **FrameBuffer**.
-
-Those will be the only states inherited from the primary command buffer, thus, even when beginning to record commands, viewport and stencil states must be set again.
-
-Let’s start by showing a primary command buffer setup:
-
-```
+```cpp
 VkClearValue clearValues[2];
 VkRenderPassBeginInfo renderPassBeginInfo {};
 renderPassBeginInfo.renderPass = renderPass;
 renderPassBeginInfo.framebuffer = frameBuffer;
 vkBeginCommandBuffer(primaryCommandBuffer, &cmdBufInfo);
-```
-
-
-When beginning a render pass that will be split among one or more secondary command buffers, we need to add the **VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS** flag:
-
-```
 vkCmdBeginRenderPass(primaryCommandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-```
 
-
-We can then pass the **inheritanceInfo** struct to the secondary buffer:
-
-```
 VkCommandBufferInheritanceInfo inheritanceInfo {};
 inheritanceInfo.renderPass = renderPass;
 inheritanceInfo.framebuffer = frameBuffer;
-```
-
-
-And then we can begin the secondary command buffer:
-
-```
 VkCommandBufferBeginInfo commandBufferBeginInfo {};
-commandBufferBeginInfo.flags =
-VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 commandBufferBeginInfo.pInheritanceInfo = &inheritanceInfo;
-VkBeginCommandBuffer(secondaryCommandBuffer,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&commandBufferBeginInfo);
+vkBeginCommandBuffer(secondaryCommandBuffer, &commandBufferBeginInfo);
+vkCmdSetViewport(secondaryCommandBuffers.background, 0, 1, &viewport);
+vkCmdSetScissor(secondaryCommandBuffers.background, 0, 1, &scissor);
+vkCmdBindPipeline(secondaryCommandBuffers.background, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.starsphere);
+vkCmdDrawIndexed(…);
 ```
 
+注意：除继承的 render pass 与 framebuffer 外，scissor 与 viewport 等状态不会继承，必须在次级缓冲开头重新设置。录制结束后调用 vkEndCommandBuffer，再在主缓冲中通过 **vkCmdExecuteCommands** 把次级缓冲按顺序“拷贝”进主缓冲执行。多线程完成顺序不定，可通过为每个次级缓冲赋予执行索引、排序后再传入 vkCmdExecuteCommands 保证绘制顺序。此后主缓冲可继续录制或提交到队列。
 
-The secondary command buffer is now ready to start issuing drawing commands:
+### 并行录制：生成多个任务
 
-```
-vkCmdSetViewport(secondaryCommandBuffers.background, 0, 1,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&viewport);
-vkCmdSetScissor(secondaryCommandBuffers.background, 0, 1,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&scissor);
-vkCmdBindPipeline(secondaryCommandBuffers.background,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_PIPELINE_BIND_POINT_GRAPHICS,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;pipelines.starsphere);
-VkDrawIndexed(…)
-```
+最后一步是创建多个任务并行录制命令缓冲。示例中我们按“每组若干 mesh 一个命令缓冲”划分，实际更常见的是按每个 render pass 一个命令缓冲。
 
-
-Note that the scissor and viewport must always be set at the beginning, as no state is inherited outside of the bound render pass and frame buffer.
-
-Once we have finished recording the commands, we can call the **VkEndCommandBuffer** function and put the buffer into a copiable state in the primary command buffer. To copy the secondary command buffers into the primary one, there is a specific function, **vkCmdExecuteCommands**, that needs to be called:
-
-```
-vkCmdExecuteCommands(primaryCommandBuffer,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;commandBuffers.size(),
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;commandBuffers.data());
-```
-
-
-This function accepts an array of secondary command buffers that will be sequentially copied into the primary one.
-
-To ensure a correct ordering of the commands recorded, not guaranteed by multi-threading (as threads can finish in any order), we can give each command buffer an execution index, put them all into an array, sort them, and then use this sorted array in the **vkCmdExecuteCommands** function.
-
-At this point, the primary command buffer can record other commands or be submitted to the queue, as it contains all the commands copied from the secondary command buffers.
-
-## Spawning multiple tasks to record command buffers
-
-
-The last step is to create multiple tasks to record command buffers in parallel. We have decided to group multiple meshes per command buffer as an example, but usually, you would record separate command buffers per render pass.
-
-Let’s take a look at the code:
-
-```
+```cpp
 SecondaryDrawTask secondary_tasks[ parallel_recordings ]{ };
 u32 start = 0;
-for ( u32 secondary_index = 0;
-&#160;&#160;&#160;&#160;&#160;&#160;secondary_index < parallel_recordings;
-&#160;&#160;&#160;&#160;&#160;&#160;++secondary_index ) {
-&#160;&#160;&#160;&#160;SecondaryDrawTask& task = secondary_tasks[
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;secondary_index ];
-&#160;&#160;&#160;&#160;task.init( scene, renderer, gpu_commands, start,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;start + draws_per_secondary );
-&#160;&#160;&#160;&#160;start += draws_per_secondary;
-&#160;&#160;&#160;&#160;task_scheduler->AddTaskSetToPipe( &task );
+for ( u32 secondary_index = 0; secondary_index < parallel_recordings; ++secondary_index ) {
+  SecondaryDrawTask& task = secondary_tasks[ secondary_index ];
+  task.init( scene, renderer, gpu_commands, start, start + draws_per_secondary );
+  start += draws_per_secondary;
+  task_scheduler->AddTaskSetToPipe( &task );
 }
 ```
 
+每个 mesh 组对应一个任务，任务内为一段 mesh 范围录制一个次级命令缓冲。添加完所有任务后，需等待它们完成，再把次级缓冲依次交给主缓冲执行：
 
-We add a task to the scheduler for each mesh group. Each task will record a command buffer for a range of meshes.
-
-Once we have added all the tasks, we have to wait until they complete before adding the secondary command buffers for execution on the main command buffer:
-
-```
-for ( u32 secondary_index = 0;
-&#160;&#160;&#160;&#160;&#160;&#160;secondary_index < parallel_recordings;
-&#160;&#160;&#160;&#160;&#160;&#160;++secondary_index ) {
-&#160;&#160;&#160;&#160;SecondaryDrawTask& task = secondary_tasks[
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;secondary_index ];
-&#160;&#160;&#160;&#160;task_scheduler->WaitforTask( &task );
-&#160;&#160;&#160;&#160;vkCmdExecuteCommands( gpu_commands->vk_command_buffer,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;1, &task.cb->vk_command_buffer );
+```cpp
+for ( u32 secondary_index = 0; secondary_index < parallel_recordings; ++secondary_index ) {
+  SecondaryDrawTask& task = secondary_tasks[ secondary_index ];
+  task_scheduler->WaitforTask( &task );
+  vkCmdExecuteCommands( gpu_commands->vk_command_buffer, 1, &task.cb->vk_command_buffer );
 }
 ```
 
+更多实现细节可参考本章源码。
 
-We suggest reading the code for this chapter for more details on the implementation.
+本节说明了如何并行录制多个命令缓冲以优化 CPU 侧、分配策略与跨帧复用、主/次级缓冲的区别与在渲染器中的用法，并演示了并行录制的完整流程。下一章将介绍**帧图（Frame Graph）**，用于定义多个 render pass，并可结合本章的任务系统为每个 pass 并行录制命令缓冲。
 
-In this section, we have described how to record multiple command buffers in parallel to optimize this operation on the CPU. We have detailed our allocation strategy for command buffers and how they can be reused across frames.
+## 本章小结
 
-We have highlighted the differences between primary and secondary buffers and how they are used in our renderer. Finally, we have demonstrated how to record multiple command buffers in parallel.
+本章介绍了**基于任务的并行**概念，以及如何用 enkiTS 等库为 Raptor Engine 快速加入多线程能力；随后讲解了通过**异步加载器**从文件加载数据到 GPU，并围绕 Vulkan 实现了与绘制队列并行的**第二执行队列**；区分了**主命令缓冲**与**次级命令缓冲**的用法；强调了在并行录制时**缓冲分配策略**的重要性，以及跨帧复用时的安全与效率；最后按步骤演示了两种命令缓冲的用法，足以为采用 Vulkan 的应用带来所需的并行度。下一章将实现**帧图**数据结构，用于自动化部分录制流程（含 barrier），并简化并行渲染任务的粒度决策。
 
-In the next chapter, we are going to introduce the frame graph, a system that allows us to define multiple render passes and that can take advantage of the task system we have described to record the command buffer for each render pass in parallel.
+## 延伸阅读
 
-# 小结
-In this chapter, we learned about the concept of task-based parallelism and saw how using a library such as enkiTS can quickly add multi-threading capabilities to the Raptor Engine.
-
-We then learned how to add support for loading data from files to the GPU using an asynchronous loader. We also focused on Vulkan-related code to have a second queue of execution that can run in parallel to the one responsible for drawing. We saw the difference between primary and secondary command buffers.
-
-We talked about the importance of the buffer’s allocation strategy to ensure safety when recording commands in parallel, especially taking into consideration command reuse between frames.
-
-Finally, we showed step by step how to use both types of command buffers, and this should be enough to add the desired level of parallelism to any application that decides to use Vulkan as its graphics API.
-
-In the next chapter, we will work on a data structure called **Frame Graph**, which will give us enough information to automate some of the recording processes, including barriers, and will ease the decision making about the granularity of the tasks that will perform parallel rendering.
-
-# 延伸阅读
-Task-based systems have been in use for many years. [https://www.gdcvault.com/play/1012321/Task-based-Multithreading-How-to](https://www.gdcvault.com/play/1012321/Task-based-Multithreading-How-to) provides a good overview.
-
-Many articles can be found that cover work-stealing queues at [https://blog.molecular-matters.com/2015/09/08/job-system-2-0-lock-free-work-stealing-part-2-a-specialized-allocator/](https://blog.molecular-matters.com/2015/09/08/job-system-2-0-lock-free-work-stealing-part-2-a-specialized-allocator/) and are a good starting point on the subject.
-
-The PlayStation 3 and Xbox 360 use the Cell processor from IBM to provide more performance to developers through multiple cores. In particular, the PlayStation 3 has several **synergistic processor units** (**SPUs**) that developers can use to offload work from the main processor.
-
-There are many presentations and articles that detail many clever ways developers have used these processors, for example, [https://www.gdcvault.com/play/1331/The-PlayStation-3-s-SPU](https://www.gdcvault.com/play/1331/The-PlayStation-3-s-SPU) and [https://gdcvault.com/play/1014356/Practical-Occlusion-Culling-on](https://gdcvault.com/play/1014356/Practical-Occlusion-Culling-on).
+- 基于任务的系统已使用多年，[Task-based Multithreading - How to](https://www.gdcvault.com/play/1012321/Task-based-Multithreading-How-to) 提供了很好的概览。
+- 关于无锁 work-stealing 队列可参考 [Job system 2.0: lock-free work-stealing](https://blog.molecular-matters.com/2015/09/08/job-system-2-0-lock-free-work-stealing-part-2-a-specialized-allocator/) 等文章。
+- PlayStation 3 与 Xbox 360 使用 IBM Cell 处理器，通过多核为开发者提供更高性能；PS3 的协同处理单元（SPU）常用于从主处理器卸载工作。可参阅 [The PlayStation 3's SPU](https://www.gdcvault.com/play/1331/The-PlayStation-3-s-SPU)、[Practical Occlusion Culling on the SPU](https://gdcvault.com/play/1014356/Practical-Occlusion-Culling-on) 等演讲与文章。

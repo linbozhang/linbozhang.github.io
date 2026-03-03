@@ -210,6 +210,7 @@ texture( global_textures[ nonuniformEXT( texture_index ) ], vTexcoord0 )
 ### 将 GLSL 编译为 SPIR-V
 我们使用第 1 章《介绍 Raptor Engine 与 Hydra》中的顶点着色器。之前把着色器源码字符串放在 main.cpp 里，并在传给 Vulkan 创建管线前未先编译成 SPIR-V。
 从本章起，所有着色器代码放在各章的 `shaders` 目录下。第 2 章《改进资源管理》中有两个文件：顶点着色器 `main.vert` 和片元着色器 `main.frag`。下面是 `main.vert` 的内容：
+```glsl
 #version 450
 layout ( std140, binding = 0 ) uniform LocalConstants {
 mat4 model;
@@ -234,6 +235,7 @@ vTexcoord0 = texCoord0;
 vNormal = mat3(model_inverse) * normal;
 vTangent = tangent;
 }
+```
 这是较标准的顶点着色器：位置、切线、法线、纹理坐标四路输入，一个所有顶点共用的 LocalConstants uniform 缓冲，以及输出到片元着色器的变量。
 Vulkan SDK 提供将 GLSL 编译为 SPIR-V、以及把生成的 SPIR-V 反汇编为可读形式的工具，便于调试异常行为的着色器。
 编译顶点着色器可执行：
@@ -354,6 +356,7 @@ case ( SpvOpEntryPoint ): {
 ```
 
 从中取出 execution model，转换为 `VkShaderStageFlags` 并存入 `stage`。接着解析 descriptor set 索引与 binding：
+```c++
 {case ( SpvOpDecorate ):
 u32 id_index = data[ word_index + 1 ];
 Id& id= ids[ id_index ];
@@ -374,8 +377,10 @@ break;
 }
 break;
 }
+```
 先取 ID 的索引（变量可前向声明，同一 ID 可能被多次更新）。再取装饰类型，我们只关心 DescriptorSet 和 Binding，并把值存到该 ID 的条目中。
 下面以变量类型解析为例：
+```c++
 {case ( SpvOpTypeVector ):
 u32 id_index = data[ word_index + 1 ];
 Id& id= ids[ id_index ];
@@ -384,8 +389,10 @@ id.type_index = data[ word_index + 2 ];
 id.count = data[ word_index + 3 ];
 break;
 }
+```
 反汇编中向量由其元素类型和数量定义，我们将其存入 ID 的 type_index 与 count。type_index 指向 ids 数组中的另一项，可用来递归获取类型信息。
 接着是采样器类型：
+```c++
 {case ( SpvOpTypeSampler ):
 u32 id_index = data[ word_index + 1 ];
 RASSERT( id_index < id_bound );
@@ -393,7 +400,9 @@ RASSERT( id_index < id_bound );
 id.op = op;
 break;
 }
+```
 这里只需保存该条目的 Op 类型。最后是变量类型的处理：
+```c++
 {case ( SpvOpVariable ):
 u32 id_index = data[ word_index + 2 ];
 Id& id= ids[ id_index ];
@@ -403,6 +412,7 @@ id.storage_class = ( SpvStorageClass )data[
 word_index + 3 ];
 break;
 }
+```
 该条目的关键信息是 type_index（总是指向指针类型）和 storage_class。storage_class 用来区分我们关心的变量与可跳过的条目。
 解析完所有 ID 后，遍历并找出变量，再根据 storage_class 只处理 Uniform / UniformConstant；通过二次间接（先取指针类型，再取所指类型）得到真实类型，据此创建 binding 并加入对应 set 的 layout（Struct→UNIFORM_BUFFER，SampledImage→COMBINED_IMAGE_SAMPLER，count 暂为 1）。uniform 与 storage buffer 可从二进制区分，但无法判断是否 dynamic，需由应用指定或通过命名约定（如 dyn_ 前缀）自动识别。
 以上是对 SPIR-V 二进制格式的入门介绍，多读几遍会更容易掌握。会解析 SPIR-V 后还可用来自动化其他工作，例如生成 C++ 头文件以保持 CPU/GPU 结构体一致。欢迎在现有实现上扩展你需要的功能。

@@ -1,1005 +1,380 @@
-# Chapter 4: Implementing a Frame Graph
+# 第 4 章：实现帧图（Frame Graph）
 
-# 4
+本章介绍**帧图（frame graph）**——一种用于控制单帧渲染步骤的新系统。 顾名思义，我们将把渲染一帧所需的各个**步骤（pass）**组织成一张**有向无环图（DAG）**，从而确定各 pass 的执行顺序以及哪些 pass 可以并行执行。
+使用图结构还能带来：自动化 render pass 与 framebuffer 的创建与管理；通过**内存别名（memory aliasing）**减少帧所需内存；由帧图统一管理内存屏障与布局转换。本章将涵盖：理解帧图结构与实现细节；实现拓扑排序以保证 pass 按正确顺序执行；用图驱动渲染并自动化资源管理与布局转换。
+## 技术需求
 
+本章代码见：https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter4
 
+## 理解帧图
 
-# Implementing a Frame Graph
+目前 Raptor Engine 的渲染仍只包含单个 pass。这对前面章节足够，但无法支撑后续更复杂的管线；现代渲染引擎通常包含大量 pass，手写管理既繁琐又易出错。因此我们在此引入帧图。本节介绍图的结构及在代码中的主要接口。
 
+### 图的构成
 
-In this chapter, we are introducing **frame graphs**, a new system to control the rendering steps for a given frame. As the name implies, we are going to organize the steps (passes) required to render a frame in a **Directed Acyclic Graph** (**DAG**). This will allow us to determine the order of execution of each pass and which passes can be executed in parallel.
+图由**节点（node/vertex）**与**边（edge）**定义；节点之间通过边连接。
 
-Having a graph also provides us with many other benefits, such as the following:
+![image-20260303161637713](./image-20260303161637713.png)
 
-- It allows us to automate the creation and management of render passes and frame buffers, as each pass defines the input resources it will read from and which resources it will write to.
+Figure 4.1 – 从节点 A 到 B 的一条边。
 
+帧图是 **DAG**，需满足：**有向**——边有方向，A→B 与 B→A 需不同边；**无环**——不能沿后继路径回到自身，否则会无限循环。
 
-- It helps us reduce the memory required for a frame with a technique called **memory aliasing**. We can determine how long a resource will be in use by analyzing the graph. After the resource is no longer needed, we can reuse its memory for a new resource.
+![image-20260303161629961](./image-20260303161629961.png)
 
+Figure 4.2 – 有向图中 A→B 与 B→A；
 
-- Finally, we’ll be able to let the graph manage the insertion of memory barriers and layout transitions during its execution. Each input and output resource defines how it will be used (texture versus attachment, for instance), and we can infer its next layout with this information.
+![image-20260303161618740](./image-20260303161618740.png)
 
+Figure 4.3 – 含环示例。
 
+在帧图中每个节点对应一个渲染 pass（depth prepass、G-Buffer、光照等）；边不显式定义，由节点的输入/输出隐含——某 pass 的输出被另一 pass 用作输入即产生一条边。
 
+![image-20260303161538902](./image-20260303161538902.png)
 
-In summary, in this chapter, we’re going to cover the following main topics:
+Figure 4.4 – 完整帧图示例。
 
-- Understanding the structure of a frame graph and the details of our implementations
+下面说明我们如何用数据结构表示图。
 
-
-- Implementing a topological sort to make sure the passes execute in the right order
-
-
-- Using the graph to drive rendering and automate resource management and layout transitions
-
-
-
-
-
-# 技术需求
-本章代码见以下链接： [https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter4](https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter4).
-
-# Understanding frame graphs
-
-
-So far, the rendering in the Raptor Engine has consisted of one pass only. While this approach has served us well for the topics we have covered, it won’t scale for some of the later chapters. More importantly, it wouldn’t be representative of how modern rendering engines organize their work. Some games and engines implement hundreds of passes, and having to manually manage them can become tedious and error-prone.
-
-Thus, we decided this was a good time in the book to introduce a frame graph. In this section, we are going to present the structure of our graph and the main interfaces to manipulate it in the code.
-
-Let’s start with the basic concepts of a graph.
-
-## Building a graph
-
-
-Before we present our solution and implementation for the frame graph, we would like to provide some of the building blocks that we are going to use throughout the chapter. If you’re familiar with frame graphs, or graphs in general, feel free to skim through this section.
-
-A graph is defined by two elements: **nodes** (or vertices) and **edges**. Each node can be connected to one or more nodes, and each connection is defined by an edge.
-
-
-
- ![Figure 4.1 – An edge from node A to B](image/B18395_04_01.jpg)
-
-
-Figure 4.1 – An edge from node A to B
-
-In the introduction of this chapter, we mentioned that a frame graph is a DAG. It’s important that our frame graph has these properties as otherwise, we wouldn’t be able to execute it:
-
-- **Directed**: This means that the edges have a direction. If, for instance, we define an edge to go from node *A* to node *B*, we can’t use the same edge to go from *B* to *A*. We would need a different edge to go from *B* to *A*.
-
-
-
-
-
-
-
- ![Figure 4.2 – Connecting A to B and B to A in a directed graph](image/B18395_04_02.jpg)
-
-
-Figure 4.2 – Connecting A to B and B to A in a directed graph
-
-- **Acyclic**: This means that there can’t be any cycles in the graph. A cycle is introduced when we can go back to a given node after following the path from one of its children. If this happens, our frame graph will enter an infinite loop.
-
-
-
-
-
-
-
- ![Figure 4.3 – An example of a graph containing a cycle](image/B18395_04_03.jpg)
-
-
-Figure 4.3 – An example of a graph containing a cycle
-
-In the case of a frame graph, each node represents a rendering pass: depth prepass, g-buffer, lighting, and so on. We don’t define the edges explicitly. Instead, each node will define a number of outputs and, if needed, a number of inputs. An edge is then implied when the output of a given pass is used as input in another pass.
-
-
-
- ![Figure 4.4 – An example of a full frame graph](image/B18395_04_04.jpg)
-
-
-Figure 4.4 – An example of a full frame graph
-
-These two concepts, nodes and edges, are all that is needed to understand a frame graph. Next, we are going to present how we decided to encode this data structure.
-
-## A data-driven approach
-
-
-Some engines only provide a code interface to build a frame graph, while others let developers specify the graph in a human-readable format – JSON for example – so that making changes to the graph doesn’t necessarily require code changes.
-
-After some consideration, we have decided to define our graph in JSON and implement a parser to instantiate the classes required. There are a few reasons we opted for this approach:
-
-- It allows us to make some changes to the graph without having to recompile the code. If, for instance, we want to change the size or format of a render target, all we have to do is make the change in the JSON definition of the graph and rerun the program.
-
-
-- We can also reorganize the graph and remove some of its nodes without making changes to the code.
-
-
-- It’s easier to understand the flow of the graph. Depending on the implementation, the definition of the graph in code could be spread across different code locations or even different files. This makes it harder to determine the graph structure.
-
-
-- It’s easier for non-technical contributors to make changes. The graph definition could also be done through a visual tool and translated into JSON. The same approach wouldn’t be feasible if the graph definition was done purely in code.
-
-
-
-
-We can now have a look at a node in our frame graph:
-
+### 数据驱动方式
+有的引擎只提供代码接口构建帧图，有的则允许用可读格式（如 JSON）描述图，这样修改图不必改代码。我们选择用 **JSON 定义图**并实现解析器实例化所需类，原因包括：修改图时无需重新编译；可重组图、删除节点而不用动代码；图的流程更易阅读；非技术人员也更容易参与，甚至可用可视化工具编辑再导出 JSON。下面是一个帧图节点的 JSON 示例：
 ```
 {
-&#160;&#160;&#160;&#160;"inputs":
-&#160;&#160;&#160;&#160;[
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;{
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"type": "attachment",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"name": "depth"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;],
-&#160;&#160;&#160;&#160;"name": "gbuffer_pass",
-&#160;&#160;&#160;&#160;"outputs":
-&#160;&#160;&#160;&#160;[
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;{
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"type": "attachment",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"name": "gbuffer_colour",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"format": "VK_FORMAT_B8G8R8A8_UNORM",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"resolution": [ 1280, 800 ],
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"op": "VK_ATTACHMENT_LOAD_OP_CLEAR"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;},
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;{
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"type": "attachment",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"name": "gbuffer_normals",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"format": "VK_FORMAT_R16G16B16A16_SFLOAT",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"resolution": [ 1280, 800 ],
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"op": "VK_ATTACHMENT_LOAD_OP_CLEAR"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;},
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;...
-&#160;&#160;&#160;&#160;]
+"inputs":
+[
+{
+"type": "attachment",
+"name": "depth"
+}
+],
+ "name": "gbuffer_pass",
+"outputs":
+[
+{
+"type": "attachment",
+"name": "gbuffer_colour",
+"format": "VK_FORMAT_B8G8R8A8_UNORM",
+"resolution": [ 1280, 800 ],
+"op": "VK_ATTACHMENT_LOAD_OP_CLEAR"
+},
+{
+"type": "attachment",
+"name": "gbuffer_normals",
+"format": "VK_FORMAT_R16G16B16A16_SFLOAT",
+"resolution": [ 1280, 800 ],
+"op": "VK_ATTACHMENT_LOAD_OP_CLEAR"
+},
+...
+]
 }
 ```
-
-
-A node is defined by three variables:
-
-- **name**: This helps us identify the node during execution, and it also gives us a meaningful name for other elements, for instance, the render pass associated with this node.
-
-
-- **inputs**: This lists the inputs for this node. These are resources that have been produced by another node. Note that it would be an error to define an input that has not been produced by another node in the graph. The only exceptions are external resources, which are managed outside the render graph, and the user will have to provide them to the graph at runtime.
-
-
-- **outputs**: These are the resources produced by a given node.
-
-
-
-
-We have defined four different types of resources depending on their use:
-
-- **attachment**: The list of attachments is used to determine the render pass and framebuffer composition of a given node. As you noticed in the previous example, attachments can be defined both for inputs and outputs. This is needed to continue working on a resource in multiple nodes. After we run a depth prepass, for instance, we want to load the depth data and use it during the g-buffer pass to avoid shading pixels for objects that are hidden behind other objects.
-
-
-- **texture**: This type is used to distinguish images from attachments. An attachment has to be part of the definition of the render pass and framebuffer for a node, while a texture is read during the pass and is part of a shader data definition.
-
-
-
-
-This distinction is also important to determine which images need to be transitioned to a different layout and require an image barrier. We’ll cover this in more detail later in the chapter.
-
-We don’t need to specify the size and format of the texture here, as we had already done so when we first defined the resource as an output.
-
-- **buffer**: This type represents a storage buffer that we can write to or read from. As with textures, we will need to insert memory barriers to ensure the writes from a previous pass are completed before accessing the buffer data in another pass.
-
-
-- **reference**: This type is used exclusively to ensure the right edges between nodes are computed without creating a new resource.
-
-
-
-
-All types are quite intuitive, but we feel that the reference type deserves an example to better understand why we need this type:
-
+节点由三个字段定义：**name**（执行时标识节点，并为 render pass 等提供名称）；**inputs**（本节点使用的、由其他节点产生的资源，未在图中产生的输入会报错，仅外部资源例外，需在运行时提供给图）；**outputs**（本节点产生的资源）。我们按用途定义了四类资源：**attachment**——用于确定节点的 render pass 与 framebuffer 组成，输入/输出都可声明，以便多节点复用同一资源（如 depth prepass 后 G-Buffer pass 加载 depth 做遮挡）；**texture**——与 attachment 区分，attachment 参与 pass/framebuffer 定义，texture 在 pass 内被读取、属于 shader 数据，该区分也用于决定哪些图像需布局转换与 barrier，后文详述；texture 的尺寸与格式在首次作为 output 定义时已指定，此处无需重复；**buffer**——storage buffer，读写均需在跨 pass 时插入内存屏障；**reference**——仅用于建立节点间边而不创建新资源。下面用 reference 类型举例：
 ```
 {
-&#160;&#160;&#160;&#160;"inputs":
-&#160;&#160;&#160;&#160;[
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;{
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"type": "attachment",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"name": "lighting"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;},
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;{
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"type": "attachment",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"name": "depth"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;],
-&#160;&#160;&#160;&#160;"name": "transparent_pass",
-&#160;&#160;&#160;&#160;"outputs":
-&#160;&#160;&#160;&#160;[
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;{
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"type": "reference",
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;"name": "lighting"
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;]
+"inputs":
+[
+{
+"type": "attachment",
+"name": "lighting"
+},
+{
+"type": "attachment",
+"name": "depth"
+}
+],
+ "name": "transparent_pass",
+"outputs":
+[
+{
+"type": "reference",
+"name": "lighting"
+}
+]
 }
 ```
+此处 lighting 是 attachment 类型的输入。处理图时会正确把产生 lighting 的节点连到本节点；但还要让**后续**使用 lighting 的节点与本节点建立连接，否则节点顺序会错。因此在 transparent pass 的 output 里对 lighting 加一个 **reference**；不能再用 attachment，否则会在创建 render pass 与 framebuffer 时重复计入 lighting。下面进入实现部分。
 
+## 实现帧图
 
-In this case, lighting is an input resource of the **attachment** type. When processing the graph, we will correctly link the node that produced the lighting resource to this node. However, we also need to make sure that the next node that makes use of the lighting resource creates a connection to this node, as otherwise, the node ordering would be incorrect.
+本节定义全章使用的数据结构（资源与节点），并解析 JSON 生成资源与节点。先看数据结构。
 
-For this reason, we add a reference to the lighting resource in the output of the transparent pass. We can’t use the **attachment** type here as otherwise, we would double count the lighting resource in the creation of the render pass and framebuffer.
+### 资源（Resources）
 
-Now that you have a good understanding of the frame graph structure, it’s time to look at some code!
-
-## Implementing the frame graph
-
-
-In this section, we are going to define the data structures that are going to be used throughout the chapter, namely resources and nodes. Next, we are going to parse the JSON definition of the graph to create resources and nodes that will be used for subsequent steps.
-
-Let’s start with the definition of our data structures.
-
-### Resources
-
-
-**Resources** define an input or an output of a node. They determine the use of the resource for a given node and, as we will explain later, they are used to define edges between the frame graph nodes. A resource is structured as follows:
-
+资源表示节点的输入或输出，决定其在某节点中的用途，并用于定义帧图节点之间的边。结构如下：
 ```
 struct FrameGraphResource {
-&#160;&#160;&#160;&#160;FrameGraphResourceType type;
-&#160;&#160;&#160;&#160;FrameGraphResourceInfo resource_info;
-&#160;&#160;&#160;&#160;FrameGraphNodeHandle producer;
-&#160;&#160;&#160;&#160;FrameGraphResourceHandle output_handle;
-&#160;&#160;&#160;&#160;i32 ref_count = 0;
-&#160;&#160;&#160;&#160;const char* name = nullptr;
+FrameGraphResourceType type;
+FrameGraphResourceInfo resource_info;
+FrameGraphNodeHandle producer;
+FrameGraphResourceHandle output_handle;
+i32 ref_count = 0;
+const char* name = nullptr;
 };
 ```
-
-
-A resource can be either an input or an output of a node. It’s worth going through each field in the following list:
-
-- **type**: Defines whether we are dealing with an image or a buffer.
-
-
-- **resource_info**: Contains the details about the resource (such as size, format, and so on) based on **type**.
-
-
-- **producer**: Stores a reference to the node that outputs a resource. This will be used to determine the edges of the graph.
-
-
-- **output_handle**: Stores the parent resource. It will become clearer later why we need this field.
-
-
-- **ref_count**: Will be used when computing which resources can be aliased. Aliasing is a technique that allows multiple resources to share the same memory. We will provide more details on how this works later in this chapter.
-
-
-- **name**: Contains the name of the resource as defined in JSON. This is useful for debugging and also to retrieve the resource by name.
-
-
-
-
-Next, we are going to look at a graph node:
-
+资源既可作输入也可作输出。字段含义：**type**——图像或 buffer；**resource_info**——尺寸、格式等；**producer**——产生该资源的节点，用于建边；**output_handle**——父资源句柄，后文说明；**ref_count**——计算别名（aliasing）时用，即多资源共享同一块内存；**name**——JSON 中的名称，便于调试与按名查找。接下来看图节点：
 ```
 struct FrameGraphNode {
-&#160;&#160;&#160;&#160;RenderPassHandle render_pass;
-&#160;&#160;&#160;&#160;FramebufferHandle framebuffer;
-&#160;&#160;&#160;&#160;FrameGraphRenderPass* graph_render_pass;
-&#160;&#160;&#160;&#160;Array<FrameGraphResourceHandle> inputs;
-&#160;&#160;&#160;&#160;Array<FrameGraphResourceHandle> outputs;
-&#160;&#160;&#160;&#160;Array<FrameGraphNodeHandle> edges;
-&#160;&#160;&#160;&#160;const char* name = nullptr;
+RenderPassHandle render_pass;
+FramebufferHandle framebuffer;
+FrameGraphRenderPass* graph_render_pass;
+Array<FrameGraphResourceHandle> inputs;
+Array<FrameGraphResourceHandle> outputs;
+Array<FrameGraphNodeHandle> edges;
+const char* name = nullptr;
 };
 ```
+节点保存执行时使用的输入列表与产生的输出列表；每个输入/输出都是独立的 FrameGraphResource，通过 output_handle 把输入链到其输出资源。同一图像可能先作为 output attachment 再作为 input texture，类型不同故需分开资源实例，这一区分用于自动插入内存屏障。节点还保存所连节点列表、名称、根据输入/输出定义创建的 framebuffer 与 render pass，以及指向渲染实现的指针（与 render pass 的绑定后文说明）。FrameGraphBuilder 负责创建节点与资源。解析与使用流程如下。
 
+### 解析图（Parsing the graph）
 
-A node stores the list of inputs it will use during execution and the outputs it will produce. Each input and output is a different instance of **FrameGraphResource**. The **output_handle** field is used to link an input to its output resource. We need separate resources because their type might differ; an image might be used as an output attachment and then used as an input texture. This is an important detail that will be used to automate memory barrier placement.
+定义好数据结构后，解析 JSON 填充这些结构并生成帧图。步骤：
 
-A node also stores a list of the nodes it is connected to, its name, the framebuffer, and the render pass created according to the definition of its inputs and outputs. Like resources, a node also stores its name as defined on JSON.
-
-Finally, a node contains a pointer to the rendering implementation. We’ll discuss later how we link a node to its rendering pass.
-
-These are the main data structures used to define our frame graph. We have also created a **FrameGraphBuilder** helper class that will be used by the **FrameGraph** class. The **FrameGraphBuilder** helper class contains the functionality to create nodes and resources.
-
-Let’s see how these building blocks are used to define our frame graph!
-
-### Parsing the graph
-
-
-Now that we have defined the data structures that make our graph, we need to parse the JSON definition of the graph to fill those structures and create our frame graph definition. Here are the steps that need to be executed to parse the frame graph:
-
-- We start by initializing a **FrameGraphBuilder** and **FrameGraph** class:
-
+1. 初始化 FrameGraphBuilder 与 FrameGraph：
 ```
 FrameGraphBuilder frame_graph_builder;
-```
-
-```
 frame_graph_builder.init( &gpu );
-```
-
-```
 FrameGraph frame_graph;
-```
-
-```
 frame_graph.init( &frame_graph_builder );
 ```
-
-
-- Next, we call the **parse** method to read the JSON definition of the graph and create the resources and nodes for it:
-
-```
-frame_graph.parse( frame_graph_path,
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&scratch_allocator );
-```
-
-
-- Once we have our graph definition, we have our compile step:
-
-```
-frame_graph.compile();
-```
-
-
-
-
-This step is where the magic happens. We analyze the graph to compute the edges between nodes, create the framebuffer and render passes for each class, and determine which resources can be aliased. We are going to explain each of these steps in detail in the next section.
-
-- Once we have compiled our graph, we need to register our rendering passes:
-
+2. 调用 parse 读取 JSON 并创建资源与节点：
+`frame_graph.parse( frame_graph_path, &scratch_allocator );`
+3. 编译：`frame_graph.compile();` —— 在此步计算节点间边、为每个节点创建 framebuffer 与 render pass、确定可别名的资源，下一节详述。
+4. 注册各渲染 pass：
 ```
 frame_graph->builder->register_render_pass(
-```
-
-```
-&#160;&#160;&#160;&#160;"depth_pre_pass", &depth_pre_pass );
-```
-
-```
+"depth_pre_pass", &depth_pre_pass );
 frame_graph->builder->register_render_pass(
-```
-
-```
-&#160;&#160;&#160;&#160;"gbuffer_pass", &gbuffer_pass );
-```
-
-```
+"gbuffer_pass", &gbuffer_pass );
 frame_graph->builder->register_render_pass(
-```
-
-```
-&#160;&#160;&#160;&#160;"lighting_pass", &light_pass );
-```
-
-```
+"lighting_pass", &light_pass );
 frame_graph->builder->register_render_pass(
-```
-
-```
-&#160;&#160;&#160;&#160;"transparent_pass", &transparent_pass );
-```
-
-```
+"transparent_pass", &transparent_pass );
 frame_graph->builder->register_render_pass(
+"depth_of_field_pass", &dof_pass );
 ```
+这样可方便地替换每个 pass 的实现类，甚至运行时切换。
+5. 渲染：`frame_graph->render( gpu_commands, scene );`。
 
-```
-&#160;&#160;&#160;&#160;"depth_of_field_pass", &dof_pass );
-```
+下面详述 compile 与 render。
 
+## 实现拓扑排序
 
+帧图实现的核心在 compile 内：计算边、创建 framebuffer/render pass、资源别名。以下为算法要点，完整实现见本章 GitHub。
 
-
-This allows us to test different implementations for each pass by simply swapping which class we register for a given pass. It’s even possible to swap these passes at runtime.
-
-- Finally, we are ready to render our scene:
-
-```
-frame_graph->render( gpu_commands, scene );
-```
-
-
-
-
-We are now going to look at the **compile** and **render** methods in detail.
-
-## Implementing topological sort
-
-
-As we mentioned in the preceding section, the most interesting aspects of the frame graph implementation are inside the **compile** method. We have abbreviated some of the code for clarity in the following sections.
-
-Please refer to the GitHub link mentioned in the *Technical requirements* section of the chapter for the full implementation.
-
-Here is a breakdown of the algorithm that we use to compute the edges between nodes:
-
-- The first step we perform is to create the edges between nodes:
-
-```
+**计算节点间边**：遍历每个节点的每个输入，按名称找到对应的 output 资源，把 output 的信息写入 input（producer、resource_info、output_handle），并在产生该输入的父节点与本节点之间建立边。第一步代码如下：
 for ( u32 r = 0; r < node->inputs.size; ++r ) {
-```
-
-```
-&#160;&#160;&#160;&#160;FrameGraphResource* resource = frame_graph->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;get_resource( node->inputs[ r ].index );
-```
-
-```
-&#160;&#160;&#160;&#160;u32 output_index = frame_graph->find_resource(
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;hash_calculate( resource->name ) );
-```
-
-```
-&#160;&#160;&#160;&#160;FrameGraphResource* output_resource = frame_graph
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;->get_resource( output_index );
-```
-
-
-
-
-We accomplish this by iterating through each input and retrieving the corresponding output resource. Note that internally, the graph stores the outputs in a map keyed by name.
-
-- Next, we save the details of the output in the input resource. This way we have direct access to this data in the input as well:
-
-```
-&#160;&#160;&#160;&#160;resource->producer = output_resource->producer;
-```
-
-```
-&#160;&#160;&#160;&#160;resource->resource_info = output_resource->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource_info;
-```
-
-```
-&#160;&#160;&#160;&#160;resource->output_handle = output_resource->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;output_handle;
-```
-
-
-- Finally, we create an edge between the node that produces this input and the node we are currently processing:
-
-```
-&#160;&#160;&#160;&#160;FrameGraphNode* parent_node = ( FrameGraphNode*)
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;frame_graph->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;get_node(
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;producer.index );
-```
-
-```
-&#160;&#160;&#160;&#160;parent_node->edges.push( frame_graph->nodes[
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;node_index ] );
-```
-
-```
-}
-```
-
-
-
-
-At the end of this loop, each node will contain the list of nodes it is connected to. While we currently don’t do this, at this stage, it would be possible to remove nodes that have no edges from the graph.
-
-Now that we have computed the connection between nodes, we can sort them in topological order. At the end of this step, we will obtain the list of nodes ordered to ensure that nodes that produce an output come before the nodes that make use of that output.
-
-Here is a breakdown of the sorting algorithm where we have highlighted the most relevant sections of the code:
-
-- The **sorted_node** array will contain the sorted nodes in reverse order:
-
-```
+ FrameGraphResource* resource = frame_graph->
+get_resource( node->inputs[ r ].index );
+u32 output_index = frame_graph->find_resource(
+hash_calculate( resource->name ) );
+FrameGraphResource* output_resource = frame_graph
+->get_resource( output_index );
+（图中 output 按名称存于 map。）第二步：把 output 的 producer、resource_info、output_handle 写入 input。第三步：在 producer 节点与当前节点间建边（parent_node->edges.push( 当前节点 )）。循环结束后每个节点都有其连接的节点列表；此阶段也可选择移除无边的节点。然后对节点做**拓扑排序**，得到“生产者先于消费者”的执行顺序。排序算法要点：sorted_nodes 存的是逆序结果；
 Array<FrameGraphNodeHandle> sorted_nodes;
-```
-
-```
 sorted_nodes.init( &local_allocator, nodes.size );
-```
-
-
-- The **visited** array will be used to mark which nodes we have already processed. We need to keep track of this information to avoid infinite loops:
-
-```
-Array<u8> visited;
-```
-
-```
-visited.init( &local_allocator, nodes.size, nodes.size
-```
-
-```
-);
-```
-
-```
-memset( visited.data, 0, sizeof( bool ) * nodes.size );
-```
-
-
-- Finally, the **stack** array is used to keep track of which nodes we still have to process. We need this data structure as our implementation doesn’t make use of recursion:
-
-```
-Array<FrameGraphNodeHandle> stack;
-```
-
-```
-stack.init( &local_allocator, nodes.size );
-```
-
-
-- The graph is traversed by using **depth-first search** (**DFS**). The code that follows performs exactly this task:
-
-```
-for ( u32 n = 0; n < nodes.size; ++n ) {
-```
-
-```
-&#160;&#160;&#160;&#160;stack.push( nodes[ n ] );
-```
-
-
-- We iterate through each node and add it to the stack. We do this to ensure we process all the nodes in the graph:
-
-```
-&#160;&#160;&#160;&#160;while ( stack.size > 0 ) {
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphNodeHandle node_handle =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;stack.back();
-```
-
-
-- We then have a second loop that will be active until we have processed all nodes that are connected to the node we just added to the stack:
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if (visited[ node_handle.index ] == 2) {
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;stack.pop();
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;continue;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-```
-
-
-
-
-If a node has already been visited and added to the list of sorted nodes, we simply remove it from the stack and continue processing other nodes. Traditional graph processing implementations don’t have this step.
-
-We had to add it as a node might produce multiple outputs. These outputs, in turn, might link to multiple nodes, and we don’t want to add the producing node multiple times to the sorted node list.
-
-- If the node we are currently processing has already been visited and we got to it in the stack, it means we processed all of its children, and it can be added to the list of sorted nodes. As mentioned in the following code, we also mark it as added so that we won’t add it multiple times to the list:
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( visited[ node_handle.index ]&#160;&#160;== 1) {
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;visited[ node_handle.index ] = 2; // added
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;sorted_nodes.push( node_handle );
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;stack.pop();
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;continue;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-```
-
-
-- When we first get to a node, we mark it as **visited**. As mentioned in the following code block, this is needed to make sure we don’t process the same node multiple times:
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;visited[ node_handle.index ] = 1; // visited
-```
-
-
-- If the node we are processing has no edges, we continue to iterate:
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphNode* node = ( FrameGraphNode* )
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->node_cache.
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;nodes.access_resource
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;( node_handle.index
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;);
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;// Leaf node
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( node->edges.size == 0 ) {
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;continue;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-```
-
-
-- On the other hand, if the node is connected to other nodes, we add them to the stack for processing and then iterate again. If this is the first time you’ve seen an iterative implementation of graph traversal, it might not be immediately clear how it relates to the recursive implementation. We suggest going through the code a few times until you understand it; it’s a powerful technique that will come in handy at times!
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;for ( u32 r = 0; r < node->edges.size; ++r ) {
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphNodeHandle child_handle =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;node->edges[ r ];
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( !visited[ child_handle.index ] ) {
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;stack.push( child_handle );
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-```
-
-
-- The final step is to iterate through the sorted nodes array and add them to the graph nodes in reverse order:
-
-```
-for ( i32 i = sorted_nodes.size - 1; i >= 0; --i ) {
-```
-
-```
-&#160;&#160;&#160;&#160;nodes.push( sorted_nodes[ i ] );
-```
-
-```
+visited 标记已处理节点以防环；stack 替代递归做迭代 DFS。外层：对每个节点 push 进 stack；内层：若 visited==2 表示已加入排序列表，pop 并继续；若 visited==1 表示其子节点已处理完，标记为 2、加入 sorted_nodes、pop；首次到达时置 visited=1。因一节点可有多个 output 连到多节点，需避免同一节点被多次加入排序列表，故用 1/2 两阶段。代码片段：
+if ( visited[ node_handle.index ] == 1) {
+ visited[ node_handle.index ] = 2; // added
+sorted_nodes.push( node_handle );
+stack.pop();
+continue;
 }
-```
+（叶节点 edges.size==0 时 continue；否则把未访问的子节点 push 进 stack。最后把 sorted_nodes 逆序写回 nodes 即得到拓扑序。）排序完成后即可分析哪些资源可做**内存别名**。
 
+## 计算资源别名（Computing resource aliasing）
+大型帧图有大量节点与资源，许多资源的生命周期并不覆盖整帧，因此可在不再需要时复用其内存（**内存别名**：多资源指向同一块分配）。
 
+![image-20260303161301417](./image-20260303161301417.png)
 
+Figure 4.5 – 帧内资源生命周期示例；
 
-We have now completed the topological sorting of the graph! With the nodes sorted, we can now proceed to analyze the graph to identify which resources can be aliased.
-
-### Computing resource aliasing
-
-
-Large frame graphs must deal with hundreds of nodes and resources. The lifetime of these resources might not span the full graph, and this gives us an opportunity to reuse memory for resources that are no longer needed. This technique is called **memory aliasing**, as multiple resources can point to the same memory allocation.
-
-
-
- ![Figure 4.5 – An example of resource lifetime across the frame](image/B18395_04_05.jpg)
-
-
-Figure 4.5 – An example of resource lifetime across the frame
-
-In this example, we can see that the **gbuffer_colour** resource is not needed for the full frame, and its memory can be reused, for instance, for the **final** resource.
-
-We first need to determine the first and last nodes that use a given resource. Once we have the information, we can determine whether a given node can reuse existing memory for its resources. The code that follows implements this technique.
-
-We start by allocating a few helper arrays:
-
+例如 gbuffer_colour 不必保留整帧，其内存可复用于最终结果等。做法：先确定每个资源的首次与末次使用节点，再在分配时优先复用已释放的内存。实现中先分配辅助数组：
 ```
 sizet resource_count = builder->resource_cache.resources.
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;used_indices;
+used_indices;
 Array<FrameGraphNodeHandle> allocations;
 allocations.init( &local_allocator, resource_count,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource_count );
+resource_count );
 for ( u32 i = 0; i < resource_count; ++i) {
-&#160;&#160;&#160;&#160;allocations[ i ].index = k_invalid_index;
-}
+} allocations[ i ].index = k_invalid_index;
 Array<FrameGraphNodeHandle> deallocations;
 deallocations.init( &local_allocator, resource_count,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource_count );
+resource_count );
 for ( u32 i = 0; i < resource_count; ++i) {
-&#160;&#160;&#160;&#160;deallocations[ i ].index = k_invalid_index;
-}
+} deallocations[ i ].index = k_invalid_index;
 Array<TextureHandle> free_list;
 free_list.init( &local_allocator, resource_count );
 ```
-
-
-They are not strictly needed by the algorithm, but they are helpful for debugging and ensuring our implementation doesn’t have a bug. The **allocations** array will track on which node a given resource was allocated.
-
-Similarly, the **deallocations** array contains the node at which a given resource can be deallocated. Finally, **free_list** will contain the resources that have been freed and can be reused.
-
-Next, we are going to look at the algorithm that tracks the allocations and deallocations of resources:
-
+allocations 记录某资源在哪个节点分配，deallocations 记录在哪个节点可释放，free_list 存已释放可复用的纹理。算法：先遍历所有节点的输入，对每次作为输入使用的资源增加 ref_count；再遍历节点与输出，对非外部且尚未分配的 attachment 进行分配——若 free_list 非空则用其最后一个纹理做别名（传给 TextureCreation），否则新建；最后遍历该节点输入，对对应 output 资源 ref_count--，若变为 0 则记入 deallocations 并把纹理放入 free_list。核心代码见下（省略部分已在上文说明）：
 ```
 for ( u32 i = 0; i < nodes.size; ++i ) {
-&#160;&#160;&#160;&#160;FrameGraphNode* node = ( FrameGraphNode* )builder->
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;node_cache.nodes.access
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_resource( nodes[ i ].index );
-&#160;&#160;&#160;&#160;for ( u32 j = 0; j < node->inputs.size; ++j ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResource* input_resource =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->resource_cache.resources.get(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;node->inputs[ j ].index );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResource* resource =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->resource_cache.resources.get(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;input_resource->output_handle.index );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource->ref_count++;
-&#160;&#160;&#160;&#160;}
+FrameGraphNode* node = ( FrameGraphNode* )builder->
+node_cache.nodes.access
+ _resource( nodes[ i ].index );
+for ( u32 j = 0; j < node->inputs.size; ++j ) {
+FrameGraphResource* input_resource =
+builder->resource_cache.resources.get(
+node->inputs[ j ].index );
+FrameGraphResource* resource =
+builder->resource_cache.resources.get(
+input_resource->output_handle.index );
+resource->ref_count++;
+}
 }
 ```
-
-
-First, we loop through all the input resources and increase their reference count each time they are used as input. We also mark which node allocates the resource in the **allocations** array:
-
+（第一段循环：对所有输入增加对应 output 的 ref_count；第二段：对每个节点的输出，若非外部且未分配则在本节点分配——attachment/texture 从 free_list 取或新建；第三段：对该节点输入对应的 output 做 ref_count--，若为 0 则加入 free_list。）
 ```
 for ( u32 i = 0; i < nodes.size; ++i ) {
-&#160;&#160;&#160;&#160;FrameGraphNode* node = builder->get_node(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;nodes[ i ].index );
-&#160;&#160;&#160;&#160;for ( u32 j = 0; j < node->outputs.size; ++j ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;u32 resource_index = node->outputs[ j ].index;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResource* resource =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->resource_cache.resources.get(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource_index );
-```
-
-
-The next step is to iterate through all the nodes and their outputs. The code that follows is responsible for performing the memory allocations:
-
-```
+FrameGraphNode* node = builder->get_node(
+nodes[ i ].index );
+for ( u32 j = 0; j < node->outputs.size; ++j ) {
+u32 resource_index = node->outputs[ j ].index;
+FrameGraphResource* resource =
+builder->resource_cache.resources.get(
+resource_index );
 if ( !resource->resource_info.external &&
-&#160;&#160;allocations[ resource_index ].index ==
-&#160;&#160;k_invalid_index ) {
-&#160;&#160;&#160;&#160;&#160;&#160;allocations[ resource_index ] = nodes[ i ];
+allocations[ resource_index ].index ==
+k_invalid_index ) {
+allocations[ resource_index ] = nodes[ i ];
 if ( resource->type ==
-&#160;&#160;FrameGraphResourceType_Attachment ) {
-&#160;&#160;&#160;&#160;&#160;FrameGraphResourceInfo& info =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource->resource_info;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( free_list.size > 0 ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;TextureHandle alias_texture =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;free_list.back();
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;free_list.pop();
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;TextureCreation texture_creation{ };
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;TextureHandle handle =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->device->create_texture(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;texture_creation );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;info.texture.texture = handle;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;} else {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;TextureCreation texture_creation{ };
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;TextureHandle handle =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->device->create_texture(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;texture_creation );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;info.texture.texture = handle;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;}
-```
-
-
-For each output resource, we first check whether there are any available resources that can be reused. If so, we pass the free resource to the **TextureCreation** structure. Internally, **GpuDevice** will use the memory from this resource and bind it to the newly created resource. If no free resources are available, we proceed by creating a new resource.
-
-The last part of the loop takes care of determining which resources can be freed and added to the free list:
-
-```
-&#160;&#160;&#160;&#160;for ( u32 j = 0; j < node->inputs.size; ++j ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResource* input_resource =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->resource_cache.resources.get(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;node->inputs[ j ].index );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;u32 resource_index = input_resource->
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;output_handle.index;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResource* resource =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->resource_cache.resources.get(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource_index );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource->ref_count--;
+FrameGraphResourceType_Attachment ) {
+FrameGraphResourceInfo& info =
+resource->resource_info;
+if ( free_list.size > 0 ) {
+TextureHandle alias_texture =
+ free_list.back();
+free_list.pop();
+TextureCreation texture_creation{ };
+TextureHandle handle =
+builder->device->create_texture(
+texture_creation );
+info.texture.texture = handle;
+} else {
+TextureCreation texture_creation{ };
+TextureHandle handle =
+builder->device->create_texture(
+texture_creation );
+info.texture.texture = handle;
+}
+}
+}
+}
+for ( u32 j = 0; j < node->inputs.size; ++j ) {
+FrameGraphResource* input_resource =
+builder->resource_cache.resources.get(
+node->inputs[ j ].index );
+u32 resource_index = input_resource->
+output_handle.index;
+FrameGraphResource* resource =
+builder->resource_cache.resources.get(
+resource_index );
+resource->ref_count--;
 if ( !resource->resource_info.external &&
-&#160;&#160;resource->ref_count == 0 ) {
-&#160;&#160;&#160;&#160;&#160;deallocations[ resource_index ] = nodes[ i ];
+resource->ref_count == 0 ) {
+ deallocations[ resource_index ] = nodes[ i ];
 if ( resource->type ==
-&#160;&#160;FrameGraphResourceType_Attachment ||
-&#160;&#160;resource->type ==
-&#160;&#160;FrameGraphResourceType_Texture ) {
-&#160;&#160;&#160;&#160;&#160;free_list.push( resource->resource_info.
-&#160;&#160;&#160;&#160;&#160;texture.texture );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;}
+FrameGraphResourceType_Attachment ||
+resource->type ==
+FrameGraphResourceType_Texture ) {
+free_list.push( resource->resource_info.
+texture.texture );
+}
+}
+}
 }
 ```
+图分析完成后，用生成的资源创建 framebuffer，即可进入渲染。下一节说明如何用帧图驱动渲染。
 
+## 用帧图驱动渲染（Driving rendering with the frame graph）
 
-We iterate over the inputs one final time and decrease the reference count of each resource. If the reference count reaches **0**, it means this is the last node that uses the resource. We save the node in the **deallocations** array and add the resource to the free list, ready to be used for the next node we are going to process.
-
-This concludes the implementation of the graph analysis. The resources we have created are used to create the **framebuffer** object, at which point the graph is ready for rendering!
-
-We are going to cover the execution of the graph in the next section.
-
-## Driving rendering with the frame graph
-
-
-After the graph has been analyzed, we have all the details we need for rendering. The following code is responsible for executing each node and ensuring all the resources are in the correct state for use by that node:
-
+图分析完成后即可按拓扑序执行各节点，并为每个节点把资源置于正确状态。主循环对每个节点：
 ```
 for ( u32 n = 0; n < nodes.size; ++n ) {
-&#160;&#160;&#160;&#160;FrameGraphNode*node = builder->get_node( nodes
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[ n ].index );
-&#160;&#160;&#160;&#160;gpu_commands->clear( 0.3, 0.3, 0.3, 1 );
-&#160;&#160;&#160;&#160;gpu_commands->clear_depth_stencil( 1.0f, 0 );
+FrameGraphNode*node = builder->get_node( nodes
+[ n ].index );
+gpu_commands->clear( 0.3, 0.3, 0.3, 1 );
+gpu_commands->clear_depth_stencil( 1.0f, 0 );
 for ( u32 i = 0; i < node->inputs.size; ++i ) {
-&#160;&#160;&#160;FrameGraphResource* resource =
-&#160;&#160;&#160;builder->get_resource( node->inputs[ i ].index
-&#160;&#160;&#160;);
+FrameGraphResource* resource =
+builder->get_resource( node->inputs[ i ].index
+ );
 if ( resource->type ==
-&#160;&#160;FrameGraphResourceType_Texture ) {
-&#160;&#160;&#160;&#160;&#160;Texture* texture =
-&#160;&#160;&#160;&#160;&#160;gpu_commands->device->access_texture(
-&#160;&#160;&#160;&#160;&#160;resource->resource_info.texture.texture
-&#160;&#160;&#160;&#160;&#160;);
+FrameGraphResourceType_Texture ) {
+Texture* texture =
+gpu_commands->device->access_texture(
+resource->resource_info.texture.texture
+);
 util_add_image_barrier( gpu_commands->
-&#160;&#160;&#160;&#160;vk_command_buffer, texture->vk_image,
-&#160;&#160;&#160;&#160;RESOURCE_STATE_RENDER_TARGET,
-&#160;&#160;&#160;&#160;RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-&#160;&#160;&#160;&#160;0, 1, resource->resource_info.
-&#160;&#160;&#160;&#160;texture.format ==
-&#160;&#160;&#160;&#160;VK_FORMAT_D32_SFLOAT );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;} else if ( resource->type ==
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResourceType_Attachment ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;Texture*texture = gpu_commands->device->
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;access_texture( resource->
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource_info.texture.texture
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;); }
-&#160;&#160;&#160;&#160;}
-```
-
-
-We first iterate through all the inputs of a node. If the resource is a texture, we insert a barrier to transition that resource from an attachment layout (for use in a render pass) to a shader stage layout (for use in a fragment shader).
-
-This step is important to make sure any previous writes have completed before we access this resource for reading:
-
-```
-&#160;&#160;&#160;&#160;for ( u32 o = 0; o < node->outputs.size; ++o ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResource* resource =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;builder->resource_cache.resources.get(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;node->outputs[ o ].index );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( resource->type ==
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;FrameGraphResourceType_Attachment ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;Texture* texture =
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;gpu_commands->device->access_texture(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource->resource_info.texture.texture
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;);
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;width = texture->width;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;height = texture->height;
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;if ( texture->vk_format == VK_FORMAT_D32_SFLOAT ) {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;util_add_image_barrier(
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;gpu_commands->vk_command_buffer,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;texture->vk_image, RESOURCE_STATE_UNDEFINED,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;RESOURCE_STATE_DEPTH_WRITE, 0, 1, resource->
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource_info.texture.format ==
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_FORMAT_D32_SFLOAT );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;} else {
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;util_add_image_barrier( gpu_commands->
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;vk_command_buffer, texture->vk_image,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;RESOURCE_STATE_UNDEFINED,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;RESOURCE_STATE_RENDER_TARGET, 0, 1,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;resource->resource_info.texture.format ==
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VK_FORMAT_D32_SFLOAT );
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;}
-&#160;&#160;&#160;&#160;}
-```
-
-
-Next, we iterate over the outputs of the node. Once again, we need to make sure the resource is in the correct state to be used as an attachment in the render pass. After this step, our resources are ready for rendering.
-
-The render targets of each node could all have different resolutions. The following code ensures that our scissor and viewport sizes are correct:
-
-```
-&#160;&#160;&#160;&#160;Rect2DInt scissor{ 0, 0,( u16 )width, ( u16 )height };
-&#160;&#160;&#160;&#160;gpu_commands->set_scissor( &scissor );
-&#160;&#160;&#160;&#160;Viewport viewport{ };
-&#160;&#160;&#160;&#160;viewport.rect = { 0, 0, ( u16 )width, ( u16 )height };
-&#160;&#160;&#160;&#160;viewport.min_depth = 0.0f;
-&#160;&#160;&#160;&#160;viewport.max_depth = 1.0f;
-&#160;&#160;&#160;&#160;gpu_commands->set_viewport( &viewport );
-```
-
-
-Once the viewport and scissor are set correctly, we call the **pre_render** method on each node. This allows each node to perform any operations that must happen outside a render pass. For instance, the render pass for the depth-of-field effect takes the input texture and computes the MIP maps for that resource:
-
-```
-&#160;&#160;&#160;&#160;node->graph_render_pass->pre_render( gpu_commands,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;render_scene );
-```
-
-
-Finally, we bind the render pass for this node, call the **render** method of the rendering pass that we registered for this node, and end the loop by ending the render pass:
-
-```
-&#160;&#160;&#160;&#160;gpu_commands->bind_pass( node->render_pass, node->
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;framebuffer, false );
-&#160;&#160;&#160;&#160;node->graph_render_pass->render( gpu_commands,
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;render_scene );
-&#160;&#160;&#160;&#160;gpu_commands->end_current_render_pass();
+vk_command_buffer, texture->vk_image,
+RESOURCE_STATE_RENDER_TARGET,
+RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+0, 1, resource->resource_info.
+texture.format ==
+VK_FORMAT_D32_SFLOAT );
+} else if ( resource->type ==
+FrameGraphResourceType_Attachment ) {
+Texture*texture = gpu_commands->device->
+access_texture( resource->
+resource_info.texture.texture
+); }
 }
 ```
+先遍历节点输入：若为 texture，插入 barrier 将其从 attachment 布局转为 fragment shader 可读布局；若为 attachment 则取得纹理指针（后续用于输出时设置尺寸）。确保此前写入完成再读取。
+```
+for ( u32 o = 0; o < node->outputs.size; ++o ) {
+FrameGraphResource* resource =
+builder->resource_cache.resources.get(
+node->outputs[ o ].index );
+if ( resource->type ==
+FrameGraphResourceType_Attachment ) {
+Texture* texture =
+gpu_commands->device->access_texture(
+resource->resource_info.texture.texture
+ );
+width = texture->width;
+height = texture->height;
+if ( texture->vk_format == VK_FORMAT_D32_SFLOAT ) {
+util_add_image_barrier(
+gpu_commands->vk_command_buffer,
+texture->vk_image, RESOURCE_STATE_UNDEFINED,
+RESOURCE_STATE_DEPTH_WRITE, 0, 1, resource->
+resource_info.texture.format ==
+VK_FORMAT_D32_SFLOAT );
+} else {
+util_add_image_barrier( gpu_commands->
+vk_command_buffer, texture->vk_image,
+RESOURCE_STATE_UNDEFINED,
+RESOURCE_STATE_RENDER_TARGET, 0, 1,
+resource->resource_info.texture.format ==
+VK_FORMAT_D32_SFLOAT );
+}
+}
+}
+```
+再遍历输出：对 attachment 类型插入 barrier（UNDEFINED→DEPTH_WRITE 或 RENDER_TARGET），并记录 width/height。各节点分辨率可能不同，随后根据 width/height 设置 scissor 与 viewport：
+```
+Rect2DInt scissor{ 0, 0,( u16 )width, ( u16 )height };
+gpu_commands->set_scissor( &scissor );
+Viewport viewport{ };
+viewport.rect = { 0, 0, ( u16 )width, ( u16 )height };
+viewport.min_depth = 0.0f;
+viewport.max_depth = 1.0f;
+gpu_commands->set_viewport( &viewport );
+然后调用 `node->graph_render_pass->pre_render()`，供节点在 render pass 外执行操作（如景深 pass 为输入纹理生成 MIP）。最后绑定本节点的 render pass 与 framebuffer，调用注册的 render，再结束 render pass：
+gpu_commands->bind_pass( node->render_pass, node->
+framebuffer, false );
+node->graph_render_pass->render( gpu_commands,
+render_scene );
+gpu_commands->end_current_render_pass();
+}
+```
+本章从帧图所用主要数据结构出发，说明了如何解析图并依输入/输出计算边、做拓扑排序、用内存别名优化分配，以及按节点执行渲染并保证资源状态正确。尚未实现但可增强帧图的功能包括：检测图中环、禁止同一节点既生产又消费同一输入；当前别名采用贪心策略（取第一个可容纳的已释放资源），可能产生碎片与次优内存使用。欢迎在代码基础上继续改进。
 
+## 本章小结
 
-This concludes the code overview for this chapter! We have covered a lot of ground; this is a good time for a brief recap: we started with the definition of the main data structures used by our frame graph implementation. Next, we explained how the graph is parsed to compute the edges between nodes by using inputs and outputs.
+本章实现了帧图以改进 render pass 管理，便于后续扩展渲染管线。我们介绍了图的基本概念（节点与边）、帧图在 JSON 中的结构及采用数据驱动的原因；然后详述了图的处理流程：主要数据结构、解析生成节点与资源与边的计算、拓扑排序保证执行顺序、基于生命周期的内存别名策略，以及渲染循环中如何保证资源状态。下一章将结合前两章的多线程与帧图，演示如何并行使用计算与图形管线进行布料模拟。
 
-Once this step is completed, we can sort the nodes in topological order to ensure they are executed in the correct order. We then create the resources needed to execute the graph and make use of memory aliasing to optimize memory usage. Finally, we iterate over each node for rendering, making sure that all resources are in the correct state for that node.
+## 延伸阅读
 
-There are some features that we haven’t implemented and that could improve the functionality and robustness of our frame graph. For example, we should ensure there are no loops in the graph and that an input isn’t being produced by the same node it’s being used in.
-
-For the memory aliasing implementation, we use a greedy approach and simply pick the first free resource that can accommodate a new resource. This can lead to fragmentation and suboptimal use of memory.
-
-We encourage you to experiment with the code and improve on it!
-
-# 小结
-In this chapter, we implemented a frame graph to improve the management of rendering passes and make it easier to expand our rendering pipeline in future chapters. We started by covering the basic concepts, nodes and edges, that define a graph.
-
-Next, we gave an overview of the structure of our graph and how it’s encoded in JSON format. We also mentioned why we went for this approach as opposed to defining the graph fully in code.
-
-In the last part, we detailed how the graph is processed and made ready for execution. We gave an overview of the main data structures used for the graph, and covered how the graph is parsed to create nodes and resources, and how edges are computed. Next, we explained the topological sorting of nodes, which ensures they are executed in the correct order. We followed that with the memory allocation strategy, which allows us to reuse memory from resources that are no longer needed at given nodes. Finally, we provided an overview of the rendering loop and how we ensure that resources are in the correct state for rendering.
-
-In the next chapter, we are going to take advantage of the techniques we have developed in the last two chapters. We are going to leverage multithreading and our frame graph implementation to demonstrate how to use compute and graphics pipelines in parallel for cloth simulation.
-
-# 延伸阅读
-Our implementation has been heavily inspired by the implementation of a frame graph in the Frostbite engine, and we recommend watching this presentation: [https://www.gdcvault.com/play/1024045/FrameGraph-Extensible-Rendering-Architecture-in](https://www.gdcvault.com/play/1024045/FrameGraph-Extensible-Rendering-Architecture-in).
-
-Many other engines implement a frame graph to organize and optimize their rendering pipeline. We encourage you to look at other implementations and find the solution that best fits your needs!
+- 本实现深受 Frostbite 引擎帧图的启发，推荐观看：[FrameGraph - Extensible Rendering Architecture in Frostbite](https://www.gdcvault.com/play/1024045/FrameGraph-Extensible-Rendering-Architecture-in)。
+- 许多引擎都使用帧图来组织与优化渲染管线，建议多参考其他实现并选择最适合需求的方案。
