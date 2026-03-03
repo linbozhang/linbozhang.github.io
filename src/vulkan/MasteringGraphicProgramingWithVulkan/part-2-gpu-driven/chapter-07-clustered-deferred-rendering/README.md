@@ -130,60 +130,13 @@ n.x += n.x >= 0.0 ? -t : t;
 n.y += n.y >= 0.0 ? -t : t;
 return normalize(n);
 }
-The following table illustrates the data arrangement of our G-buffer
-pass:
-Table 7.1 – G-buffer memory layout
-Here are the screenshots for our render targets:
-Figure 7.3 – From top to bottom: albedo, normals, and combined
-occlusion (red), roughness (green), and metalness (blue)
-We could probably reduce the number of render targets further: we
-know that in the G-buffer pass, we are only shading opaque objects, so
-we don't need the alpha channel. Also, nothing prevents us from mixing
-data for different render targets – for instance, we could have something
-like the following:
-• RGBA8: r, g, b, and normal_1
-• RGBA8: normal_2, roughness, metalness, and occlusion
-• RGBA8: emissive
-We can also try to use different texture formats (R11G11B10, for
-example) to increase the accuracy of our data. We encourage you to
-experiment with different solutions and find the one that works best for
-your use case!
-In this section, we have introduced a new Vulkan extension that
-simplifies the creation and use of the render pass and framebuffer. We
-also provided details on the implementation of our G-buffer and
-highlighted potential optimizations. In the next section, we are going to
-look at the light clustering solution that we have implemented.
-Implementing light clusters
-In this section, we are going to describe our implementation of the light
-clustering algorithm. It's based on this presentation: https://
-www.activision.com/cdn/
-research/2017_Sig_Improved_Culling_final.pdf. The main (and very
-smart) idea is to separate the XY plane from the Z range, combining the
-advantages of both tiling and clustering approaches. The algorithms are
-organized as follows:
-1. We sort the lights by their depth value in camera space.
-2. We then divide the depth range into bins of equal size, although a
-logarithmic subdivision might work better depending on your
-depth range.
-3. Next, we assign the lights to each bin if their bounding box falls
-within the bin range. We only store the minimum and maximum
-light index for a given bin, so we only need 16 bits for each bin,
-unless you need more than 65,535 lights!
-4. We then divide the screen into tiles (8x8 pixels, in our case) and
-determine which lights cover a given tile. Each tile will store a
-bitfield representation for the active lights.
-5. Given a fragment that we want to shade, we determine the depth
-of the fragment and read the bin index.
-6. Finally, we iterate from the minimum to the maximum light index
-in that bin and read the corresponding tile to see whether the
-light is visible, this time using x and y coordinates to retrieve the
-tile.
-This solution provides a very efficient way to loop through the active
-lights for a given fragment.
-CPU lights assignment
-We'll now look at the implementation. During each frame, we perform
-the following steps:
-1. We start by sorting the lights by their depth value:
+Table 7.1 – G-buffer 内存布局。Figure 7.3 – 自上而下：albedo、法线、occlusion(红)/roughness(绿)/metalness(蓝)。可进一步压缩：不透明物体不需 alpha；也可混合多 RT（如 RGBA8：rgb+normal_1；normal_2+roughness+metalness+occlusion；emissive）或使用 R11G11B10 等格式。下一节介绍我们实现的光照聚类。
+
+## 实现光照聚类
+实现基于 [Activision 2017 Sig 论文](https://www.activision.com/cdn/research/2017_Sig_Improved_Culling_final.pdf)：将 **XY 平面**与 **Z 范围**分开处理，结合 tile 与 cluster 的优点。步骤：(1) 按相机空间深度对光源排序；(2) 将深度范围划分为等长 bin（也可用对数划分）；(3) 将包围盒落在某 bin 内的光源归入该 bin，只存该 bin 的 min/max 光源索引，每 bin 16 位；(4) 将屏幕分为 tile（我们为 8×8），求覆盖每个 tile 的光源，每 tile 用**位域**表示活跃光源；(5) 着色时根据 fragment 深度读 bin 索引；(6) 在该 bin 的 min～max 范围内遍历，用 xy 取 tile 位域判断光源是否对该 fragment 可见。这样可高效遍历每个 fragment 的活跃光源。
+
+### CPU 端光源分配
+每帧步骤：(1) 按深度排序：计算每盏灯在相机空间中的中心与沿视线方向的最近/最远点（p_min、p_max），得到 projected_z、projected_z_min、projected_z_max（归一化到 [0,1]，z_far 可设小一些以提高精度）：
 float z_far = 100.0f;
 for ( u32 i = 0; i < k_num_lights; ++i ) {
 Light& light = lights[ i ];
@@ -216,11 +169,7 @@ sorted_light.projected_z_max = ( -
 projected_p_max.z - scene_data.z_near ) / (
 z_far - scene_data.z_near );
 }
-We compute the minimum and maximum point of the light sphere from
-the camera's point of view. Notice that we use a closer far depth plane
-to gain precision in the depth range.
-1. To avoid having to sort the light list, we only sort the light
-indices:
+（只对光源索引排序，避免每帧重传光源数组，只更新索引。）(2) 分配 tile：定义 light_tiles_bits 数组与 tile  stride；将光源变换到相机空间，若在相机后方可跳过：
 qsort( sorted_lights.data, k_num_lights, sizeof(
 SortedLight ), sorting_light_fn );
 u32* gpu_light_indices = ( u32* )gpu.map_buffer(
@@ -234,16 +183,14 @@ gpu.unmap_buffer( cb_map );
 }
 This optimization allows us to upload the light array only once, while
 we only need to update the light indices.
-1. Next, we proceed with the tile assignment. We start by defining
-our bitfield array and some helper variables that will be used to
-compute the index within the array:
+（定义 light_tiles_bits、tiles_entry_count、tile_stride 等。）
 Array<u32> light_tiles_bits;
 light_tiles_bits.init( context.scratch_allocator,
 tiles_entry_count, tiles_entry_count );
 float near_z = scene_data.z_near;
 float tile_size_inv = 1.0f / k_tile_size;
 u32 tile_stride = tile_x_count * k_num_words;
-2. We then transform the light position in camera space:
+（将光源位置变换到相机空间，camera_visible 判断是否在相机前方。）
 for ( u32 i = 0; i < k_num_lights; ++i ) {
 const u32 light_index = sorted_lights[ i ]
 .light_index;
@@ -260,9 +207,7 @@ if ( !camera_visible &&
 context.skip_invisible_lights ) {
 continue;
 }
-If the light is behind the camera, we don't do any further processing.
-1. Next, we compute the corners of the AABB projected to clip
-space:
+(3) 将光源包围球的 8 个角点变换到视空间再投影到 clip 空间，得到 NDC 下的 AABB（aabb_min/max），注意 y 取反以匹配屏幕坐标系：
 for ( u32 c = 0; c < 8; ++c ) {
 vec3s corner{ ( c % 2 ) ? 1.f : -1.f, ( c & 2 ) ?
 1.f : -1.f, ( c & 4 ) ? 1.f : -1.f };
@@ -286,8 +231,7 @@ aabb.x = aabb_min.x;
 aabb.z = aabb_max.x;
 aabb.w = -1 * aabb_min.y;
 aabb.y = -1 * aabb_max.y;
-2. We then proceed to determine the size of the quad in screen
-space:
+(4) 将 AABB 从 NDC 转到屏幕空间（乘以 0.5 加 0.5 再乘分辨率），得到 min_x/min_y/max_x/max_y；若完全在屏幕外则 continue：
 vec4s aabb_screen{ ( aabb.x * 0.5f + 0.5f ) * (
 gpu.swapchain_width - 1 ),
 ( aabb.y * 0.5f + 0.5f ) * (
@@ -312,9 +256,9 @@ continue;
 if ( max_x < 0.0f || max_y < 0.0f ) {
  continue;
 }
-If the light is not visible on the screen, we move to the next light.
-1. The final step is to set the bit for the light we are processing on
-all the tiles it covers:
+(5) 对该光源覆盖的所有 tile 设置对应位（first_tile_x/y、last_tile_x/y 由 min/max 除以 tile_size 得到；array_index = y*tile_stride + x，word_index = i/32，bit_index = i%32，light_tiles_bits[array_index+word_index] |= (1<<bit_index)）。最后将 light tiles 与 bin 数据上传 GPU。Table 7.2 – 深度 bin 示例；Table 7.3 – 每 tile 位域示例（每 tile 可占多个 32 位字）。下一节在 GPU 光照中如何使用这些数据。
+
+### GPU 端光照处理
 min_x = max( min_x, 0.0f );
 min_y = max( min_y, 0.0f );
 max_x = min( max_x, ( float )gpu.swapchain_width );
@@ -355,10 +299,9 @@ implemented to assign lights to a given cluster. We then detailed the
 steps to implement the algorithm. In the next section, we are going to
 use the data we have just obtained to process lights on the GPU.
 GPU light processing
-Now that we have all the data we need on the GPU, we can use it in our
-lighting computation:
-1. We start by determining which depth bin our fragment belongs
-to:
+(1) 根据 fragment 的相机空间深度计算 linear_d，得到 bin_index；从 bins[bin_index] 解码出 min_light_id 与 max_light_id（低 16 位与高 16 位）。(2) 根据 gl_GlobalInvocationID.xy 与 TILE_SIZE 得到 tile，计算 tile 在 bitfield 数组中的 address。(3) 若 max_light_id==0 表示该 bin 无光源。否则 (4) 从 min_light_id 到 max_light_id 循环，计算 word_id、bit_id，若 (tiles[address+word_id] & (1<<bit_id)) 非零则该光源覆盖该 tile，(5) 用 light_indices[light_id] 取全局光源索引，调用 calculate_point_light_contribution 累加。代码中还有使用 subgroup 指令的优化版本与注释。该技术既可用于延迟也可用于前向渲染。下一章将补上目前缺失的**阴影**。
+
+## 本章小结
 vec4 pos_camera_space = world_to_camera * vec4(
 world_position, 1.0 );
 float z_light_far = 100.0f;
@@ -368,109 +311,12 @@ int bin_index = int( linear_d / BIN_WIDTH );
 uint bin_value = bins[ bin_index ];
 uint min_light_id = bin_value & 0xFFFF;
 uint max_light_id = ( bin_value >> 16 ) & 0xFFFF;
-2. We extract the minimum and maximum light index, as they are
-going to be used in the light computation loop:
-uvec2 position = gl_GlobalInvocationID.xy;
-uvec2 tile = position / uint( TILE_SIZE );
-uint stride = uint( NUM_WORDS ) *
-( uint( resolution.x ) / uint( TILE_SIZE ) );
-uint address = tile.y * stride + tile.x;
-3. We first determine the address in the tile bitfield array. Next, we
-check whether there are any lights in this depth bin:
-if ( max_light_id != 0 ) {
-min_light_id -= 1;
-max_light_id -= 1;
-4. If max_light_id is 0, it means we didn't store any lights in this
-bin, so no lights will affect this fragment. Next, we loop over the
-lights for this depth bin:
-for ( uint light_id = min_light_id; light_id <=
-max_light_id; ++light_id ) {
-uint word_id = light_id / 32;
-uint bit_id = light_id % 32;
-5. After we compute the word and bit index, we determine which
-lights from the depth bin also cover the screen tile:
-if ( ( tiles[ address + word_id ] &
- ( 1 << bit_id ) ) != 0 ) {
-uint global_light_index =
-light_indices[ light_id ];
-Light point_light = lights[
-global_light_index ];
-final_color.rgb +=
-calculate_point_light_contribution
-( albedo, orm, normal, emissive,
-world_position, V, F0, NoV,
-point_light );
-}
-}
-}
-This concludes our light clustering algorithm. The shader code also
-contains an optimized version that makes use of the subgroup
-instructions to improve register utilization. There are plenty of
-comments to explain how it works.
-We covered a fair amount of code in this section, so don't worry if some
-things were not clear on the first read. We started by describing the
-steps of the algorithm. We then explained how the lights are sorted in
-depth bins and how we determine the lights that cover a given tile on
-the screen. Finally, we showed how these data structures are used in the
-lighting shader to determine which lights affect a given fragment.
-Note that this technique can be used both in forward and Deferred
-Rendering. Now that we have a performant lighting solution, one
-element is sorely missing from our scene: shadows! This will be the
-topic for the next chapter.
-Summary
-In this chapter, we have implemented a light clustering solution. We
-started by explaining forward and Deferred Rendering techniques and
-their main advantages and shortcomings. Next, we described two
-approaches to group lights to reduce the computation needed to shade a
-single fragment.
-We then outlined our G-buffer implementation by listing the render
-targets that we use. We detailed our use of the
-VK_KHR_dynamic_rendering extension, which allows us to simplify
-the render pass and framebuffer use. We also highlighted the relevant
-code in the G-buffer shader to write to multiple render targets, and we
-provided the implementation for our normal encoding and decoding. In
-closing, we suggested some optimizations to further reduce the memory
-used by our G-buffer implementation.
-In the last section, we described the algorithm we selected to implement
-light clustering. We started by sorting the lights by their depth value
-into depth bins. We then proceeded to store the lights that affect a given
-screen tile using a bitfield array. Finally, we made use of these two data
-structures in our lighting shader to reduce the number of lights that
-need to be evaluated for each fragment.
-Optimizing the lighting stage of any game or application is paramount
-to maintaining interactive frame rates. We described one possible
-solution, but other options are available, and we suggest you
-experiment with them to find the one that best suits your use case!
-Now that we have added many lights, the scene still looks flat as there's
-one important element missing: shadows. That's the topic for the next
-chapter!
-Further reading
-• Some history about the first Deferred Rendering in the Shrek
-game, 2001: https://sites.google.com/site/richgel99/the-early-
-history-of-deferred-shading-and-lighting
-• Stalker Deferred Rendering paper: https://developer.nvidia.com/
-gpugems/gpugems2/part-ii-shading-lighting-and-shadows/
-chapter-9-deferred-shading-stalker
-• This is one of the first papers that introduced the concept of
-clustered shading: http://www.cse.chalmers.se/~uffe/
-clustered_shading_preprint.pdf
-• These two presentations are often cited as the inspiration for
-many implementations:
-○ https://www.activision.com/cdn/
-research/2017_Sig_Improved_Culling_final.pdf
-○ http://www.humus.name/Articles/
-PracticalClusteredShading.pdf
-• In this chapter, we only covered point lights, but in practice,
-many other types of lights are used (spotlights, area lights,
-polygonal lights, and a few others). This article describes a way to
-determine the visibility of a spotlight approximated by a cone:
-○ https://bartwronski.com/2017/04/13/cull-that-cone/
-• These presentations describe variants of the clustering techniques
-we described in this chapter:
-○ https://www.intel.com/content/dam/develop/external/us/
-en/documents/lauritzen-deferred-shading-
-siggraph-2010-181241.pdf
-○ https://advances.realtimerendering.com/s2016/
-Siggraph2016_idTech6.pdf
-○ https://www.ea.com/frostbite/news/parallel-graphics-in-
-frostbite-current-future
+（position、tile、stride、address 计算；min/max_light_id 减 1 是因存储时从 1 开始；循环内 word_id、bit_id、tiles 位测试、light_indices、累加光照贡献。详见代码与 subgroup 优化版。）本章实现了光照聚类：先对比了前向与延迟渲染的优缺点及 tile/cluster 两种分组方式；再概述 G-buffer 的 RT 配置、**VK_KHR_dynamic_rendering** 的用法、多 RT 写入与法线八面体编解码，并提到进一步压缩建议；最后详述我们采用的聚类算法：按深度排序与 bin、按 tile 的位域、以及在光照 shader 中如何用 bin 与 tile 减少每 fragment 需计算的光源数。光照阶段优化对保持帧率至关重要，可多尝试不同方案。加入大量光源后场景仍缺**阴影**，下一章将专门讲解。
+
+## 延伸阅读
+- 延迟渲染早期历史（Shrek 2001）：[The Early History of Deferred Shading](https://sites.google.com/site/richgel99/the-early-history-of-deferred-shading-and-lighting)
+- [Stalker 延迟着色](https://developer.nvidia.com/gpugems/gpugems2/part-ii-shading-lighting-and-shadows/chapter-9-deferred-shading-stalker)
+- 聚类着色早期论文：[Clustered shading preprint](http://www.cse.chalmers.se/~uffe/clustered_shading_preprint.pdf)
+- 常用参考： [Activision 2017 改进剔除](https://www.activision.com/cdn/research/2017_Sig_Improved_Culling_final.pdf)、[Practical Clustered Shading](http://www.humus.name/Articles/PracticalClusteredShading.pdf)
+- 聚光灯（锥体）可见性：[Cull That Cone](https://bartwronski.com/2017/04/13/cull-that-cone/)
+- 聚类/延迟的其它实现： [Intel deferred shading Siggraph 2010](https://www.intel.com/content/dam/develop/external/us/en/documents/lauritzen-deferred-shading-siggraph-2010-181241.pdf)、[idTech6 Siggraph 2016](https://advances.realtimerendering.com/s2016/Siggraph2016_idTech6.pdf)、[Frostbite 并行图形](https://www.ea.com/frostbite/news/parallel-graphics-in-frostbite-current-future)

@@ -9,7 +9,14 @@
 本章代码见：https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter6
 
 ## 将大 mesh 拆分为 meshlet
-本章主要关注管线的**几何阶段**（着色之前）；在几何阶段增加一些复杂度可减少后续需要着色的像素。**说明**：此处“几何阶段”指 IA、顶点处理、图元装配等，不是特指 geometry shader；顶点处理可运行 vertex/geometry/tessellation/task/mesh 等 shader。内容几何体形态与复杂度各异，引擎需处理从小物体到大地形。大地形或建筑通常由美术拆块以便按距离选 LOD；拆成小块有助于剔除不可见几何，但有些 mesh 仍然很大，即使只看到一小部分也要整块处理。**Meshlet** 即为此设计：将 mesh 再细分为顶点组（通常 64 个顶点），便于在 GPU 上处理。Figure 6.1 – meshlet 细分示例。每组顶点可组成任意数量三角形，一般按硬件调优；Vulkan 推荐 126（见 [Nvidia Turing mesh shaders 介绍](https://developer.nvidia.com/blog/introduction-turing-mesh-shaders/)，需为每个 meshlet 的图元数量预留空间）。**说明**：撰写时 mesh/task shader 仅通过 Nvidia 扩展提供；本章部分 API 针对该扩展，概念可用通用 compute shader 实现；Khronos 正在制定更通用的扩展。三角形数变少后，可对不可见或被遮挡的 meshlet 做更细粒度剔除。除顶点与三角形列表外，还为每个 meshlet 生成**包围球**与**锥体（cone）**等数据，用于背面、视锥与遮挡剔除；将来也可按 LOD 启发式选择 meshlet 子集。Figure 6.2 – meshlet 包围球示例。为何用球而非 AABB？AABB 至少需两个 vec3（中心+半尺寸或 min/max）；球只需一个 vec4（中心+半径），处理数百万 meshlet 时每字节都重要，且球在视锥与遮挡测试中更简便。Figure 6.3 – meshlet 锥体示例。锥体表示 meshlet 朝向，用于背面剔除。下面看如何在代码中生成 meshlet。
+本章主要关注管线的**几何阶段**（着色之前）；在几何阶段增加一些复杂度可减少后续需要着色的像素。
+**说明**：此处“几何阶段”指 IA、顶点处理、图元装配等，不是特指 geometry shader；顶点处理可运行 vertex/geometry/tessellation/task/mesh 等 shader。
+内容几何体形态与复杂度各异，引擎需处理从小物体到大地形。大地形或建筑通常由美术拆块以便按距离选 LOD；
+拆成小块有助于剔除不可见几何，但有些 mesh 仍然很大，即使只看到一小部分也要整块处理。**Meshlet** 即为此设计：将 mesh 再细分为顶点组（通常 64 个顶点），便于在 GPU 上处理。
+
+![image-20260303163106554](./image-20260303163106554.png)
+
+Figure 6.1 – meshlet 细分示例。每组顶点可组成任意数量三角形，一般按硬件调优；Vulkan 推荐 126（见 [Nvidia Turing mesh shaders 介绍](https://developer.nvidia.com/blog/introduction-turing-mesh-shaders/)，需为每个 meshlet 的图元数量预留空间）。**说明**：撰写时 mesh/task shader 仅通过 Nvidia 扩展提供；本章部分 API 针对该扩展，概念可用通用 compute shader 实现；Khronos 正在制定更通用的扩展。三角形数变少后，可对不可见或被遮挡的 meshlet 做更细粒度剔除。除顶点与三角形列表外，还为每个 meshlet 生成**包围球**与**锥体（cone）**等数据，用于背面、视锥与遮挡剔除；将来也可按 LOD 启发式选择 meshlet 子集。Figure 6.2 – meshlet 包围球示例。为何用球而非 AABB？AABB 至少需两个 vec3（中心+半尺寸或 min/max）；球只需一个 vec4（中心+半径），处理数百万 meshlet 时每字节都重要，且球在视锥与遮挡测试中更简便。Figure 6.3 – meshlet 锥体示例。锥体表示 meshlet 朝向，用于背面剔除。下面看如何在代码中生成 meshlet。
 
 ### 生成 meshlet（Generating meshlets）
 使用开源库 **MeshOptimizer**（https://github.com/zeux/meshoptimizer）生成 meshlet；也可选用 [meshlete](https://github.com/JarkkoPFC/meshlete)。加载 mesh 的顶点与索引后，先估算最大 meshlet 数量并分配顶点/索引数组（meshlet_vertex_indices、meshlet_triangles；不修改原始 buffer，只生成指向原始缓冲的索引列表；三角形索引用 1 字节存储以节省内存）：
