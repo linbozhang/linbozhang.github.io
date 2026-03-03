@@ -1,6 +1,6 @@
 // DXBC ps_5_0 -> HLSL, literal translation. From test.dxbc. Hash: b763d45f-828a13cc-e38681f2-36a4353e
+// 按 .cursor/skills/dxbc-to-hlsl 直译：中性命名、纹理分量 .rgba、lib 中可替代处用库函数（RGBToHSV/HSVToRGB、BlendNormalRNM）。
 // cb0[387], cb1[16], t0-t5, s0-s5. Inputs: v1.xy, v2.xyz, v3.xyzw, v4.xyz, v5.x. Outputs: o0-o3.
-// 纹理采样得到的向量分量用 .rgba 表示。
 
 Texture2D<float4> T0 : register(t0);
 Texture2D<float4> T1 : register(t1);

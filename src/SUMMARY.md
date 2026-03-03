@@ -32,6 +32,9 @@
       * [Cursor Skill 配置指南](ai/common/cursor-skills/cursor-skill-config-guide.md)
       * [doc-library Skill 完整示例](ai/common/cursor-skills/doc-library-example.md)
 
+* [Vulkan](vulkan/MasteringGraphicProgramingWithVulkan/part-1-foundations/README.md)
+  * [第1章 介绍 Raptor Engine 与 Hydra](vulkan/MasteringGraphicProgramingWithVulkan/part-1-foundations/chapter-01-introducing-raptor-engine/README.md)
+
 * [站点](site/README.md)
   * [文档库配置](site/doc-setup/README.md)
     * [Cursor 规则与 Skill 搭建过程](site/doc-setup/cursor-rules-and-skills.md)

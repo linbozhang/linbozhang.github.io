@@ -27,24 +27,8 @@ description: Translates DXBC (DirectX bytecode) or shader assembly into readable
 
 - 从 `Texture.Sample` / `SampleBias` / `SampleCmpLevelZero` 等得到的向量，访问分量时用 **`.r`、`.g`、`.b`、`.a`**，不用 `.x`、`.y`、`.z`、`.w`
 
-### 3. 明确是 RGBToHSV / HSVToRGB 的代码用函数表示
+### 3. 遍历**lib/*.hlsl**中的所有函数，找到能替代对应汇编代码的部分的时候，不必保留一长段内联实现，用响应的库函数替换，便于阅读
 
-- 若某段汇编明显是在做 **RGB→HSV** 或 **HSV→RGB**（排序、chroma、hue、六段重建等），在 HLSL 中直接用 **`RGBToHSV`**、**`HSVToRGB`** 等函数表示，不必保留一长段内联实现，便于阅读
-
-### 4. 明确是 Reoriented Normal Mapping（RNM）的代码用 BlendNormalRNM 表示
-
-- 若汇编出现以下模式，对应 **Reoriented Normal Mapping**，应使用 **`BlendNormalRNM(n1, n2)`** 并对外部结果做 **normalize**：
-  - 已有两个已解包、归一化或可用的切线空间法线 n1、n2（例如分别来自两张 normal map 采样）；
-  - 随后：`t = n1 + (0, 0, 1)`；`u = n2 * (-1, -1, 1)`；`r = (t / t.z) * dot(t, u) - u`；最后对 `r` 做 normalize 写入目标。
-- 直译时用：`result = normalize(BlendNormalRNM(n1, n2));`，其中 n1、n2 为上述两个法线（传入时**不要**先加 (0,0,1) 或乘 (-1,-1,1)，BlendNormalRNM 内部会做）。
-- 实现从 **lib/CommonMaterial.hlsl** 的 `BlendNormalRNM` 复制即可（可把 `real3` 改为 `float3`）。
-
-## 可用辅助函数
-
-直译时如需 RGBToHSV、HSVToRGB、UnpackNormal 等Unity SRP Core的基础库函数，从本 Skill 的 **lib/*.hlsl** 中复制对应实现到生成的 HLSL 中（放在 PS 或主函数之前即可）。函数较多时可拆成多个文件放在 `lib/` 下（如 `lib/common.hlsl`、`lib/unpack.hlsl`），按需复制。
-
-- **lib/common.hlsl**：当前包含 `RGBToHSV`、`HSVToRGB`；可继续追加其它常用直译辅助函数。
-- **lib/CommonMaterial.hlsl**：包含 `BlendNormalRNM`（Reoriented Normal Mapping），对应汇编中「t=n1+(0,0,1), u=n2*(-1,-1,1), r=(t/t.z)*dot(t,u)-u, normalize(r)」的 68-75 类模式。
 
 ## 输出形式
 
