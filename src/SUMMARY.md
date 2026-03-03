@@ -34,6 +34,7 @@
 
 * [Vulkan](vulkan/MasteringGraphicProgramingWithVulkan/part-1-foundations/README.md)
   * [第1章 介绍 Raptor Engine 与 Hydra](vulkan/MasteringGraphicProgramingWithVulkan/part-1-foundations/chapter-01-introducing-raptor-engine/README.md)
+  * [第2章 改进资源管理](vulkan/MasteringGraphicProgramingWithVulkan/part-1-foundations/chapter-02-improving-resources-management/README.md)
 
 * [站点](site/README.md)
   * [文档库配置](site/doc-setup/README.md)
