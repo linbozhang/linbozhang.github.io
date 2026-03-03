@@ -70,6 +70,14 @@ float3 HSVToRGB(float h, float s, float v)
   return v * r2;
 }
 
+// 68-75 汇编等价。Reoriented Normal Mapping，见 lib/CommonMaterial.hlsl BlendNormalRNM
+float3 BlendNormalRNM(float3 n1, float3 n2)
+{
+  float3 t = n1 + float3(0, 0, 1);
+  float3 u = n2 * float3(-1, -1, 1);
+  return (t / t.z) * dot(t, u) - u;
+}
+
 PSOut PS(PSIn i)
 {
   PSOut o;
@@ -114,16 +122,10 @@ PSOut PS(PSIn i)
   r5.rg *= r0.aa;
   r0.w = min(dot(r5.rg, r5.rg), 1.0);
   r5.b = sqrt(1.0 - r0.w);
-  r4.xyz += float3(0, 0, 1);
-  r5.xyz *= float3(-1, -1, 1);
-
-  // 70-75
-  r6.xyz = r4.rgb / r4.b;
-  r0.w = dot(r4.rgb, r5.rgb);
-  r4.xyz = r6.xyz * r0.w - r5.rgb;
-  r0.w = dot(r4.xyz, r4.xyz);
-  r0.w = rsqrt(r0.w);
-  r5.xyz = r4.xyz * r0.w;
+  // 68-75  Reoriented Normal Mapping -> BlendNormalRNM(n1, n2) + normalize
+  float3 n1 = r4.rgb;
+  float3 n2 = r5.rgb;
+  r5.xyz = normalize(BlendNormalRNM(n1, n2));
 
   // 76-88
   float lt_v5 = (0 < i.v5_x) ? 1.0 : 0.0;
