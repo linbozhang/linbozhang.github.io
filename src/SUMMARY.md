@@ -40,6 +40,10 @@
   * [第5章 解锁异步计算](vulkan/MasteringGraphicProgramingWithVulkan/part-1-foundations/chapter-05-unlocking-async-compute/README.md)
   * [第6章 GPU 驱动渲染](vulkan/MasteringGraphicProgramingWithVulkan/part-2-gpu-driven/chapter-06-gpu-driven-rendering/README.md)
   * [第7章 聚类延迟渲染](vulkan/MasteringGraphicProgramingWithVulkan/part-2-gpu-driven/chapter-07-clustered-deferred-rendering/README.md)
+  * [第8章 用 Mesh Shader 实现阴影](vulkan/MasteringGraphicProgramingWithVulkan/part-2-gpu-driven/chapter-08-shadows-mesh-shaders/README.md)
+  * [第9章 可变着色率](vulkan/MasteringGraphicProgramingWithVulkan/part-2-gpu-driven/chapter-09-variable-rate-shading/README.md)
+  * [第10章 体积雾](vulkan/MasteringGraphicProgramingWithVulkan/part-2-gpu-driven/chapter-10-volumetric-fog/README.md)
+  * [第11章 时间性抗锯齿 (TAA)](vulkan/MasteringGraphicProgramingWithVulkan/part-3-advanced/chapter-11-taa/README.md)
 
 * [站点](site/README.md)
   * [文档库配置](site/doc-setup/README.md)

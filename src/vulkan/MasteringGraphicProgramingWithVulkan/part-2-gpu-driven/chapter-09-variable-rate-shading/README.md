@@ -1,571 +1,192 @@
-# Chapter 9: Implementing Variable Rate Shading
+# 第 9 章：实现可变着色率（Implementing Variable Rate Shading）
 
-# 9
+本章将实现近年来常用的**可变着色率（Variable Rate Shading，VRS）**：在保持观感质量的前提下，由开发者指定每个像素的着色频率，从而缩短部分渲染 pass 的时间，把省下的时间用于更多效果或更高分辨率。Vulkan 提供多种接入方式，我们会概览并实现其一。该功能通过扩展提供，仅较新硬件支持；也可用 compute shader 手动实现，此处不展开，延伸阅读中会给出参考。
 
+本章主要内容：
+- 可变着色率概念介绍
+- 用 Vulkan API 实现可变着色率
+- 用 specialization constants 配置 compute shader
 
+## 技术需求
 
-# Implementing Variable Rate Shading
+本章代码见：https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter9
 
+## 可变着色率介绍（Introducing variable rate shading）
 
-In this chapter, we are going to implement a technique that has become quite popular recently: variable rate shading. This technique allows developers to specify at which rate to shade individual pixels while maintaining the same perceived visual quality. This approach allows us to reduce the time taken for some rendering passes, and the time savings can be used to implement more features or render at higher resolutions.
+**可变着色率（VRS）** 让开发者控制 fragment 的着色频率。关闭时，所有 fragment 按 1×1 着色，即 fragment shader 对图像中每个 fragment 都执行一次。随着 VR 头显出现，开发者开始研究如何缩短单帧渲染时间：VR 需要同时渲染两眼，且对帧延迟敏感，需要更高帧率以避免晕动。其中一种做法是**注视点渲染（foveated rendering）**：中心全分辨率、外围降低质量；用户主要关注画面中心，对周围质量下降不敏感。该思路可推广到非 VR，因此 DirectX® 与 Vulkan 等 API 都加入了原生支持。在通用方案下，可为不同 fragment 指定多种着色率，常用推荐为 1×1、1×2、2×1、2×2；更高比率虽可行，但容易在最终画面上产生可见瑕疵。1×1 表示对图像中所有 fragment 都执行 fragment shader，无节省，即未开启 VRS 时的默认行为。1×2 或 2×1 表示一次 fragment shader 调用着色两个 fragment，结果复用到两者；2×2 则一次调用将同一结果应用到四个 fragment。
 
-Vulkan provides multiple options to integrate this technique into an application, and we are going to provide an overview of all of them. This feature is provided through an extension that is supported only on recent hardware, but it’s possible to implement it manually using compute shaders. We won’t cover this option here, but we are going to point you to the relevant resources in the *Further **reading* section.
+### 确定着色率（Determining the shading rate）
+为每个 fragment 选择着色率有多种方式；我们采用的是在光照 pass 之后，基于**亮度**做**边缘检测**。思路是：亮度均匀区域降低着色率，过渡区域用全分辨率；人眼对变化区域更敏感，对均匀区域不敏感，因此这样能在观感上更合理。使用的滤波器是 3×3 的经典 **Sobel 滤波器**，对每个 fragment 计算两个分量。
 
-In this chapter, we’ll cover the following main topics:
+![image-20260303195917733](./image-20260303195917733.png)
 
-- Introducing variable rate shading
+Figure 9.1 – 用于近似某 fragment 的 x、y 方向导数的滤波器（来源：Wikipedia – https://en.wikipedia.org/wiki/Sobel_operator）。再用下列公式得到最终导数值。
 
+![image-20260303195924804](./image-20260303195924804.png)
 
-- Implementing variable rate shading using the Vulkan API
+Figure 9.2 – 近似导数值的公式（来源：Wikipedia – https://en.wikipedia.org/wiki/Sobel_operator）。对下图应用 Sobel 滤波。
 
+![image-20260303195937047](./image-20260303195937047.png)
 
-- Using specialization constants to configure compute shaders
+Figure 9.3 – 光照 pass 后的渲染帧。得到如下着色率掩码。
 
+![image-20260303195946871](./image-20260303195946871.png)
 
+Figure 9.4 – 计算得到的着色率掩码。实现中：若 fragment 的 G 值（按 Figure 9.2 公式计算）大于 0.1，使用全 1×1 着色率，对应 Figure 9.4 中的黑色像素；G 值低于 0.1 的用 2×2 率，对应图中红色像素。掩码数值的计算方式在下一节说明。本节介绍了可变着色率的概念与我们的实现思路；下一节演示如何用 Vulkan API 实现该功能。
 
+## 在 Vulkan 中集成可变着色率（Integrating variable rate shading using Vulkan）
 
-
-# 技术需求
-本章代码见以下链接： [https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter9](https://github.com/PacktPublishing/Mastering-Graphics-Programming-with-Vulkan/tree/main/source/chapter9).
-
-# Introducing variable rate shading
-
-
-**Variable rate shading** (**VRS**) is a technique that allows developers to control the rate at which fragments are shaded. When this feature is disabled, all fragments are shaded using a 1x1 rate, meaning that the fragment shader will run for all fragments in the image.
-
-With the introduction of **virtual reality** (**VR**) headsets, developers have started to investigate ways to reduce the amount of time it takes to render a frame. This is crucial, not only because VR requires rendering two frames (one for the right eye and one for the left) but also because VR is quite sensitive to frame latency, and higher frame rates are required to avoid users experiencing motion sickness.
-
-One technique that was developed is called **foveated rendering**: the idea is to render the center of the image at full rate while lowering the quality outside the center. Developers have noticed that users are focused primarily on the central region of the image and don’t notice the lower quality in the surrounding area.
-
-It turns out that this approach can be generalized outside of VR. For this reason, APIs such as DirectX® and Vulkan have added support for this feature natively.
-
-With this more general approach, it’s possible to specify multiple shading rates for individual fragments. The rates that are usually recommended are 1x1, 1x2, 2x1, and 2x2. While it might be possible to adopt higher shading rates, it usually leads to a visible artifact in the final frame.
-
-As we mentioned, a 1x1 rate implies that the fragment shader will run for all fragments within an image, and there are no time savings. This is the default behavior when VRS is not enabled.
-
-A rate of 1x2 or 2x1 means that two fragments will be shaded by a single fragment shader invocation, and the computed value is applied to both fragments. Likewise, with a 2x2 shading rate, a single fragment invocation will compute and apply a single value to four fragments.
-
-## Determining the shading rate
-
-
-There are multiple options to choose the shading rate for individual fragments, and the one we have implemented is to run an edge detection filter based on luminance after the lighting pass.
-
-The idea is to reduce the shading rate in the areas of the image where luminance is uniform and use a full rate in transition areas. This approach works because the human eye is more susceptible to noticing changes in those areas compared to ones that have more uniform values.
-
-The filter we have used is the traditional Sobel filter in a 3x3 configuration. For each fragment, we compute two values:
-
-
-
- ![Figure 9.1 – The filters used to approximate the x and y derivative for a given fragment (source: Wikipedia –https://en.wikipedia.org/wiki/Sobel_operator)](image/B18395_09_01.jpg)
-
-
-Figure 9.1 – The filters used to approximate the x and y derivative for a given fragment (source: Wikipedia –https://en.wikipedia.org/wiki/Sobel_operator)
-
-We then compute the final derivative value with the following formula:
-
-
-
- ![Figure 9.2 – The formula to approximate the derivative value (source: Wikipedia –https://en.wikipedia.org/wiki/Sobel_operator)](image/B18395_09_02.jpg)
-
-
-Figure 9.2 – The formula to approximate the derivative value (source: Wikipedia –https://en.wikipedia.org/wiki/Sobel_operator)
-
-Let’s apply the Sobel filter to the following image:
-
-
-
- ![Figure 9.3 – The rendered frame after the lighting pass](image/B18395_09_03.jpg)
-
-
-Figure 9.3 – The rendered frame after the lighting pass
-
-It gives us the following shading rate mask:
-
-
-
- ![Figure 9.4 – The computed shading rate mask](image/B18395_09_04.jpg)
-
-
-Figure 9.4 – The computed shading rate mask
-
-In our implementation, we are going to use a full 1x1 rate for fragments that have a **G** value (as computed by the formula in *Figure 9**.2*) greater than **0.1**. These are the black pixels in *Figure 9**.4*.
-
-For fragments whose **G** value is below **0.1**, we are going to use a 2x2 rate, and these fragments are the red pixels in the screenshot in *Figure 9**.4*. We will explain how the values in the mask are computed in the next section.
-
-In this section, we have introduced the concepts behind variable rate shading and provided the details for our implementation. 下一节将demonstrate how to implement this feature using the Vulkan API.
-
-# Integrating variable rate shading using Vulkan
-
-
-As we mentioned in the previous section, the fragment shading rate functionality is provided through the **VK_KHR_fragment_shading_rate** extension. As with other option extensions, make sure the device you are using supports it before calling the related APIs.
-
-Vulkan provides three methods to control the shading rate:
-
-- Per draw
-
-
-- Per primitive
-
-
-- Using an image attachment for a render pass
-
-
-
-
-To use a custom shading rate per draw, there are two options. We can pass a **VkPipelineFragmentShadingRateStateCreateInfoKHR** structure when creating a pipeline, or we can call **vkCmdSetFragmentShadingRateKHR** at runtime.
-
-This approach is useful when we know in advance that some draws can be performed at a lower rate without affecting quality. This could include the sky or objects we know are far away from the camera.
-
-It’s also possible to provide a shading rate per primitive. This is accomplished by populating the **PrimitiveShadingRateKHR** built-in shader variable from a vertex or mesh shader.
-
-This can be useful if, for instance, we have determined we can use a lower level of details in the mesh shader and a lower rate to render that particular primitive.
-
-For our implementation, we decided to use the third approach as it is more flexible for our use case. As we mentioned in the previous section, we first need to compute the variable rate shading mask. This is done using a compute shader that populates the shading rate image.
-
-We start by populating a table that is shared within a shader invocation:
-
+上节提到，fragment 着色率功能由 **VK_KHR_fragment_shading_rate** 扩展提供；与其他可选扩展一样，调用相关 API 前请确认设备支持。Vulkan 提供三种控制着色率的方式：**按 draw**、**按图元（primitive）**、**在 render pass 中使用 image attachment**。按 draw 设置时有两种做法：在创建 pipeline 时传入 `VkPipelineFragmentShadingRateStateCreateInfoKHR`，或在运行时调用 `vkCmdSetFragmentShadingRateKHR`。适用于事先知道某些 draw 可以降率且不影响质量的场景，例如天空或远离相机的物体。也可以**按图元**指定着色率：在 vertex 或 mesh shader 中写入内置变量 `PrimitiveShadingRateKHR`。例如在 mesh shader 中已判定某图元可用较低 LOD 时，可同时为其指定较低着色率。我们采用第三种方式（render pass 的 image attachment），更灵活。按上节所述，先要计算可变着色率掩码，由 compute shader 写入**着色率图像（shading rate image）**。首先在 shader 调用内填充共享表：
 ```
 shared float local_image_data[ LOCAL_DATA_SIZE ][
-&#160;&#160;&#160;LOCAL_DATA_SIZE ];
+LOCAL_DATA_SIZE ];
 local_image_data[ local_index.y ][ local_index.x ] =
-&#160;&#160;&#160;luminance( texelFetch( global_textures[
-&#160;&#160;&#160;color_image_index ], global_index, 0 ).rgb );
+luminance( texelFetch( global_textures[
+color_image_index ], global_index, 0 ).rgb );
 barrier();
 ```
-
-
-Each entry in the table contains the luminance value for the fragment for this shader invocation.
-
-We used this approach to reduce the number of texture reads we needed to perform. If each shader thread had to read the values it needs individually, we would need eight texture reads. With this solution, only one read per thread is needed.
-
-There is a caveat for the threads of the fragments on the border of the region we are processing. With each shader invocation, we process 16x16 fragments, but because of how the Sobel filter works, we need to fill an 18x18 table. For the threads on the border, we need to do some extra processing to make sure the table is fully filled. We have omitted the code here for brevity.
-
-Notice that we have to use the **barrier()** method to guarantee that all threads within this workgroup have completed their write. Without this call, threads will compute the wrong value, as the table will not be filled correctly.
-
-Next, we compute the value of the derivative for a given fragment:
-
+表中每一项对应本 shader 调用所处理 fragment 的亮度值。这样做的目的是减少纹理读取：若每个线程各自读所需像素，需要 8 次读取；用共享表后每线程只需 1 次读取。注意：我们每次处理 16×16 的 fragment，但 Sobel 需要 3×3 邻域，因此实际要填 18×18 的表；处于处理区域边界的线程需要额外逻辑才能把表填满，此处省略。必须使用 `barrier()` 保证本 workgroup 内所有线程完成写入后再继续，否则表未填全会导致错误结果。接着对当前 fragment 计算导数值：
 ```
 float dx = local_image_data[ local_index.y - 1 ][
-&#160;&#160;&#160;&#160;local_index.x - 1 ] - local_image_data[
-&#160;&#160;&#160;&#160;local_index.y - 1 ][ local_index.x + 1 ] +
-&#160;&#160;&#160;&#160;2 * local_image_data[ local_index.y ][
-&#160;&#160;&#160;&#160;local_index.x - 1 ] -
-&#160;&#160;&#160;&#160;2 * local_image_data[ local_index.y ][
-&#160;&#160;&#160;&#160;local_index.x + 1 ] +
-&#160;&#160;&#160;&#160;local_image_data[ local_index.y + 1][
-&#160;&#160;&#160;&#160;local_index.x - 1 ] -
-&#160;&#160;&#160;&#160;local_image_data[ local_index.y + 1 ][
-&#160;&#160;&#160;&#160;local_index.x + 1 ];
+local_index.x - 1 ] - local_image_data[
+local_index.y - 1 ][ local_index.x + 1 ] +
+2 * local_image_data[ local_index.y ][
+local_index.x - 1 ] -
+2 * local_image_data[ local_index.y ][
+local_index.x + 1 ] +
+local_image_data[ local_index.y + 1][
+local_index.x - 1 ] -
+local_image_data[ local_index.y + 1 ][
+local_index.x + 1 ];
 float dy = local_image_data[ local_index.y - 1 ][
-&#160;&#160;&#160;&#160;local_index.x - 1 ] +
-&#160;&#160;&#160;&#160;2 * local_image_data[ local_index.y - 1 ][
-&#160;&#160;&#160;&#160;local_index.x ] +
-&#160;&#160;&#160;&#160;local_image_data[ local_index.y - 1 ][
-&#160;&#160;&#160;&#160;local_index.x + 1 ] -
-&#160;&#160;&#160;&#160;local_image_data[ local_index.y + 1 ][
-&#160;&#160;&#160;&#160;local_index.x - 1 ] -
-&#160;&#160;&#160;&#160;2 * local_image_data[ local_index.y + 1 ][
-&#160;&#160;&#160;&#160;local_index.x ] -
-&#160;&#160;&#160;&#160;local_image_data[ local_index.y + 1 ][
-&#160;&#160;&#160;&#160;local_index.x + 1 ];
+local_index.x - 1 ] +
+2 * local_image_data[ local_index.y - 1 ][
+local_index.x ] +
+local_image_data[ local_index.y - 1 ][
+local_index.x + 1 ] -
+local_image_data[ local_index.y + 1 ][
+local_index.x - 1 ] -
+2 * local_image_data[ local_index.y + 1 ][
+local_index.x ] -
+local_image_data[ local_index.y + 1 ][
+local_index.x + 1 ];
 float d = pow( dx, 2 ) + pow( dy, 2 );
-```
-
-
-This is simply applying the formula we introduced in the previous section. Now that we have computed the derivative, we need to store the shading rate for this fragment:
-
-```
+即应用上一节的公式。得到导数后，把该 fragment 的着色率写入图像：
 uint rate = 1 << 2 | 1;
 if ( d > 0.1 ) {
-&#160;&#160;&#160;&#160;rate = 0;
-}
+} rate = 0;
 imageStore( global_uimages_2d[ fsr_image_index ], ivec2(
-&#160;&#160;&#160;&#160;gl_GlobalInvocationID.xy ), uvec4( rate, 0, 0, 0 ) );
+gl_GlobalInvocationID.xy ), uvec4( rate, 0, 0, 0 ) );
 ```
-
-
-The rate is computed following the formula from the Vulkan specification:
-
-```
-size_w = 2^( ( texel / 4 ) & 3 )
-size_h = 2^( texel & 3 )
-```
-
-
-In our case, we are computing the **texel** value in the previous formula. We are setting the exponent (**0** or **1**) for the **x** and **y** shading rates and storing the value in the shading rate image.
-
-Once the shading rate image has been filled, we can use it to provide the shading rate for the render pass for the next frame. Before using this image, we need to transition it to the correct layout:
-
-```
-VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_
-&#160;&#160;&#160;&#160;KHR
-```
-
-
-We also need to use a new pipeline stage:
-
-```
-VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR
-```
-
-
-There are a few options to use the newly created shading rate image as part of a render pass. The **VkSubpassDescription2** structure can be extended by a **VkFragmentShadingRateAttachmentInfoKHR** structure, which specifies which attachment to use as the fragment shading rate. Since we aren’t using the **RenderPass2** extension just yet, we opted to extend our existing dynamic rendering implementation.
-
-We have to extend the **VkRenderingInfoKHR** structure using the following code:
-
+着色率按 Vulkan 规范中的公式编码：`size_w = 2^((texel/4) & 3)`，`size_h = 2^(texel & 3)`。我们计算的是上述公式中的 texel 值：为 x、y 着色率各设指数（0 或 1），并写入着色率图像。着色率图像填好后，可在下一帧的 render pass 中用作着色率来源。使用前需把该 image 转换到正确 layout：`VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR`，并使用新的 pipeline stage：`VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR`。将新创建的着色率图像纳入 render pass 有几种方式：可用 `VkFragmentShadingRateAttachmentInfoKHR` 扩展 `VkSubpassDescription2` 来指定用作 fragment 着色率的 attachment。我们尚未使用 RenderPass2 扩展，因此选择扩展现有的 **dynamic rendering** 实现，通过以下代码扩展 `VkRenderingInfoKHR`：
 ```
 VkRenderingFragmentShadingRateAttachmentInfoKHR
 shading_rate_info {
-&#160;&#160;&#160;&#160;VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_RATE_ATTACHMENT_INFO_KHR };
+VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING
+_RATE_ATTACHMENT_INFO_KHR };
 shading_rate_info.imageView = texture->vk_image_view;
 shading_rate_info.imageLayout =
-&#160;&#160;&#160;&#160;VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;_ATTACHMENT_OPTIMAL_KHR;
+ VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE
+_ATTACHMENT_OPTIMAL_KHR;
 shading_rate_info.shadingRateAttachmentTexelSize = { 1, 1 };
 rendering_info.pNext = ( void* )&shading_rate_info;
 ```
+至此渲染用的 shader 无需修改。本节说明了为使用着色率图像所需做的渲染代码改动，以及基于 Sobel 滤波的边缘检测 compute shader 实现；该算法的结果用于决定每个 fragment 的着色率。下一节介绍 **specialization constants**：用其在创建 pipeline 时指定常量，从而控制 compute shader 的 workgroup 大小以优化性能。
 
+## 利用 specialization constants（Taking advantage of specialization constants）
 
-And that’s it! The shader used for rendering doesn’t require any modifications.
-
-In this section, we have detailed the changes required to our rendering code to make use of a shading rate image. We have also provided the implementation of the compute shader that implements an edge detection algorithm based on the Sobel filter.
-
-The result of this algorithm is then used to determine the shading rate for each fragment.
-
-In the next section, we are going to introduce specialization constants, a Vulkan feature that allows us to control the workgroup size of compute shaders for optimal performance.
-
-# Taking advantage of specialization constants
-
-
-**Specialization constants** are a Vulkan feature that allows developers to define constant values when creating a pipeline. This is particularly useful when the same shader is needed for multiple use cases that differ only for some constant values, for example, materials. This is a more elegant solution compared to pre-processor definitions as they can be dynamically controlled at runtime without having to recompile the shaders.
-
-In our case, we want to be able to control the workgroup size of compute shaders based on the hardware we are running to obtain the best performance:
-
-- The first step in the implementation is to determine whether a shader uses specialization constants. We now identify any variables that have been decorated with the following type when parsing the shader SPIR-V:
-
+**Specialization constants** 是 Vulkan 的一项功能：在创建 pipeline 时指定常量。同一 shader 仅因少量常量不同而用于多种场景（例如不同材质）时特别有用；相比预处理器宏，可在运行时动态设置而无需重新编译 shader。我们要根据运行硬件控制 compute shader 的 workgroup 大小以获得最佳性能，实现步骤如下。1. 首先在解析 shader 的 SPIR-V 时，判断是否使用了 specialization constants，并识别带有下列 decoration 的变量：
 ```
 case ( SpvDecorationSpecId ):
-```
-
-```
 {
-```
-
-```
-&#160;&#160;&#160;&#160;id.binding = data[ word_index + 3 ];
-```
-
-```
-&#160;&#160;&#160;&#160;break;
-```
-
-```
+id.binding = data[ word_index + 3 ];
+break;
 }
 ```
-
-
-- When parsing all the variables, we now save the specialization constants’ details so that they can be used when compiling a pipeline that uses this shader:
-
+2. 解析所有变量时，保存 specialization constant 的详细信息，供编译使用该 shader 的 pipeline 时使用：
 ```
 switch ( id.op ) {
-```
-
-```
-&#160;&#160;&#160;&#160;case ( SpvOpSpecConstantTrue ):
-```
-
-```
-&#160;&#160;&#160;&#160;case ( SpvOpSpecConstantFalse ):
-```
-
-```
-&#160;&#160;&#160;&#160;case ( SpvOpSpecConstant ):
-```
-
-```
-&#160;&#160;&#160;&#160;case ( SpvOpSpecConstantOp ):
-```
-
-```
-&#160;&#160;&#160;&#160;case ( SpvOpSpecConstantComposite ):
-```
-
-```
-&#160;&#160;&#160;&#160;{
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;Id& id_spec_binding = ids[ id.type_index ];
-```
-
-```
+case ( SpvOpSpecConstantTrue ):
+case ( SpvOpSpecConstantFalse ):
+case ( SpvOpSpecConstant ):
+case ( SpvOpSpecConstantOp ):
+case ( SpvOpSpecConstantComposite ):
+{
+ Id& id_spec_binding = ids[ id.type_index ];
 SpecializationConstant&
-```
-
-```
-&#160;&#160;&#160;specialization_constant = parse_result->
-```
-
-```
-&#160;&#160;&#160;specialization_constants[
-```
-
-```
-&#160;&#160;&#160;parse_result->
-```
-
-```
-&#160;&#160;&#160;specialization_constants_count
-```
-
-```
-&#160;&#160;&#160;];
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constant.binding =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;id_spec_binding.binding;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constant.byte_stride =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;id.width / 8;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constant.default_value =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;id.value;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;SpecializationName& specialization_name =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;parse_result->specialization_names[
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;parse_result->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constants_count ];
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;raptor::StringView::copy_to(
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;id_spec_binding.name,
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_name.name, 32 );
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;++parse_result->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constants_count;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;break;
-```
-
-```
-&#160;&#160;&#160;&#160;}
-```
-
-```
+specialization_constant = parse_result->
+specialization_constants[
+parse_result->
+specialization_constants_count
+];
+specialization_constant.binding =
+id_spec_binding.binding;
+specialization_constant.byte_stride =
+id.width / 8;
+specialization_constant.default_value =
+id.value;
+SpecializationName& specialization_name =
+ parse_result->specialization_names[
+parse_result->
+specialization_constants_count ];
+raptor::StringView::copy_to(
+id_spec_binding.name,
+specialization_name.name, 32 );
+++parse_result->
+specialization_constants_count;
+break;
+}
 }
 ```
-
-
-- Now that we have the specialization constants’ information, we can change their values when creating a pipeline. We start by filling a **VkSpecializationInfo** structure:
-
+3. 有了 specialization constant 信息后，在创建 pipeline 时覆盖其值。先填充 `VkSpecializationInfo`：
 ```
 VkSpecializationInfo specialization_info;
-```
-
-```
 VkSpecializationMapEntry specialization_entries[
-```
-
-```
-&#160;&#160;&#160;&#160;spirv::k_max_specialization_constants ];
-```
-
-```
+ spirv::k_max_specialization_constants ];
 u32 specialization_data[
-```
-
-```
-&#160;&#160;&#160;&#160;spirv::k_max_specialization_constants ];
-```
-
-```
+spirv::k_max_specialization_constants ];
 specialization_info.mapEntryCount = shader_state->
-```
-
-```
-&#160;&#160;&#160;&#160;parse_result->specialization_constants_count;
-```
-
-```
+parse_result->specialization_constants_count;
 specialization_info.dataSize = shader_state->
-```
-
-```
-&#160;&#160;&#160;&#160;parse_result->specialization_constants_count *
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;sizeof( u32 );
-```
-
-```
+parse_result->specialization_constants_count *
+sizeof( u32 );
 specialization_info.pMapEntries =
-```
-
-```
-&#160;&#160;&#160;&#160;specialization_entries;
-```
-
-```
+specialization_entries;
 specialization_info.pData = specialization_data;
 ```
-
-
-- We then set the value for each specialization constant entry:
-
+4. 再为每个 specialization constant 条目设值：
 ```
 for ( u32 i = 0; i < shader_state->parse_result->
-```
-
-```
-&#160;&#160;&#160;&#160;specialization_constants_count; ++i ) {
-```
-
-```
-&#160;&#160;&#160;&#160;const spirv::SpecializationConstant&
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constant = shader_state->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;parse_result->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constants[ i ];
-```
-
-```
-&#160;&#160;&#160;&#160;cstring specialization_name = shader_state->
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;parse_result->specialization_names[ i ].name;
-```
-
-```
-&#160;&#160;&#160;&#160;VkSpecializationMapEntry& specialization_entry =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_entries[ i ];
-```
-
-```
-&#160;&#160;&#160;&#160;if ( strcmp(specialization_name, "SUBGROUP_SIZE")
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;== 0 ) {
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_entry.constantID =
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_constant.binding;
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_entry.size = sizeof( u32 );
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_entry.offset = i * sizeof( u32 );
-```
-
-```
-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;specialization_data[ i ] = subgroup_size;
-```
-
-```
-&#160;&#160;&#160;&#160;}
-```
-
-```
+specialization_constants_count; ++i ) {
+ const spirv::SpecializationConstant&
+specialization_constant = shader_state->
+parse_result->
+specialization_constants[ i ];
+cstring specialization_name = shader_state->
+parse_result->specialization_names[ i ].name;
+VkSpecializationMapEntry& specialization_entry =
+specialization_entries[ i ];
+if ( strcmp(specialization_name, "SUBGROUP_SIZE")
+== 0 ) {
+specialization_entry.constantID =
+specialization_constant.binding;
+specialization_entry.size = sizeof( u32 );
+specialization_entry.offset = i * sizeof( u32 );
+ specialization_data[ i ] = subgroup_size;
+}
 }
 ```
+我们这里查找名为 `SUBGROUP_SIZE` 的变量。最后将 specialization constant 信息存入创建 pipeline 时使用的 shader stage 结构：`shader_stage_info.pSpecializationInfo = &specialization_info`。编译时驱动与编译器会用我们指定的值覆盖 shader 中的原值。本节说明了如何用 specialization constants 在运行时改变 shader 行为：解析 SPIR-V 时识别 specialization constant 的改动，以及创建 pipeline 时覆盖其值所需的代码。
 
+## 小结（Summary）
 
+本章介绍了**可变着色率（VRS）**：在不明显损失观感的前提下提升部分渲染 pass 的性能，并说明了用边缘检测决定每个 fragment 着色率的思路。接着说明了用 Vulkan API 启用和使用该功能所需的改动，以及按 draw、按图元、按 render pass 三种控制着色率的方式；并给出了基于 Sobel 的 compute shader 边缘检测实现，以及如何用其结果生成着色率图像。最后介绍了 **specialization constants**：在创建 pipeline 时指定常量，从而根据运行设备控制 compute shader 的 workgroup 大小以优化性能。下一章将为场景加入体积效果，用于营造氛围并引导玩家视线。
 
+## 延伸阅读（Further reading）
 
-In our case, we are looking for a variable named **SUBGROUP_SIZE**. The final step is to store the specialization constant details in the shader stage structure that will be used when creating the pipeline:
-
-```
-shader_stage_info.pSpecializationInfo =
-&#160;&#160;&#160;&#160;&specialization_info;
-```
-
-
-During compilations, the driver and compiler will override the existing value in the shader with the one we specified.
-
-In this section, we have illustrated how to take advantage of specialization constants to modify shader behavior at runtime. We detailed the changes we made to identify specialization constants when parsing the SPIR-V binary. We then highlighted the new code required to override a specialization constant value when creating a pipeline.
-
-# 小结
-In this chapter, we introduced the variable rate shading technique. We gave a brief overview of this approach and how it can be used to improve the performance of some rendering passes without a loss in perceived quality. We also explained the edge detection algorithm used to determine the shading rate for each fragment.
-
-In the next section, we illustrated the changes necessary to enable and use this feature with the Vulkan API. We detailed the options available to change the shading rate at the draw, primitive, and render pass level. We then explained the implementation of the edge detection algorithm using a compute shader and how the result is used to generate the shading rate image.
-
-In the last section, we introduced specialization constants, a mechanism provided by the Vulkan API to modify shader constant values at compile time. We illustrated how this feature can be used to control the group size of compute shaders for optimal performance based on the device our code is running on.
-
-In the next chapter, we will introduce volumetric effects into our scene. This technique allows us to set the mood of the environment and can be used to direct the attention of the player to a particular area.
-
-# 延伸阅读
-We only gave a brief overview of the Vulkan APIs for variable rate shading. We recommend reading the specification for further details: [https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#primsrast-fragment-shading-rate](https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#primsrast-fragment-shading-rate).
-
-Most of the resources available online seem to be focused on the DirectX API, but the same approach can be translated to Vulkan. This blog post provides some details on the benefits of VRS: [https://devblogs.microsoft.com/directx/variable-rate-shading-a-scalpel-in-a-world-of-sledgehammers/](https://devblogs.microsoft.com/directx/variable-rate-shading-a-scalpel-in-a-world-of-sledgehammers/).
-
-These two videos provide in-depth details on integrating VRS into existing game engines. The section on how to implement VRS using compute shader is particularly interesting:
-
-- [https://www.youtube.com/watch?v=pPyN9r5QNbs](https://www.youtube.com/watch?v=pPyN9r5QNbs)
-
-
-- [https://www.youtube.com/watch?v=Sswuj7BFjGo](https://www.youtube.com/watch?v=Sswuj7BFjGo)
-
-
-
-
-This article illustrates how VRS can also have other use cases, for instance, to accelerate raytracing: [https://interplayoflight.wordpress.com/2022/05/29/accelerating-raytracing-using-software-vrs/](https://interplayoflight.wordpress.com/2022/05/29/accelerating-raytracing-using-software-vrs/).
+- Vulkan 可变着色率 API 仅作概览，细节请阅规范：https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#primsrast-fragment-shading-rate
+- 网上资料多针对 DirectX，思路可迁移到 Vulkan。VRS 收益可参考：https://devblogs.microsoft.com/directx/variable-rate-shading-a-scalpel-in-a-world-of-sledgehammers/
+- 以下两个视频深入讲解在现有引擎中集成 VRS，其中用 compute shader 实现 VRS 的部分尤其值得看：
+  * https://www.youtube.com/watch?v=pPyN9r5QNbs
+  * https://www.youtube.com/watch?v=Sswuj7BFjGo
+- VRS 也可用于其他场景（例如加速光追）：https://interplayoflight.wordpress.com/2022/05/29/accelerating-raytracing-using-software-vrs/

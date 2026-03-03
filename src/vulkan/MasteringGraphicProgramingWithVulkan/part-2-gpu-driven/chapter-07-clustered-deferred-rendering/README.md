@@ -15,14 +15,25 @@
 两种技术的共同难点是**光源分配**。前向渲染优点：材质完全自由、不透明与透明同一路径、支持 MSAA、GPU 内存带宽较低。缺点：常需 **depth prepass** 减少无效 fragment；否则会为不可见物体着色浪费算力，故帧初执行只写深度的 pass，再设 depth test 为 equal 只着色可见 fragment；prepass 可能很贵，有时用简化几何；需注意不要禁用 Early-Z（如在 fragment 中写深度或 discard）。着色复杂度为 **N×L**（物体数×光源数），且必须为每个物体处理所有光源；shader 复杂、寄存器压力大。**延迟渲染**将几何绘制与光照计算解耦：建立多个 render target（albedo、法线、PBR 参数、深度等），再对每个 fragment 处理光源；复杂度降为 **N+L**，但仍不知“哪些光影响该像素”。优点：着色复杂度低、无需 depth prepass、G-buffer 写入与光照分离、shader 更简单。缺点：**高内存**（多 RT、高分辨率与 TAA 等会叠加，常需压缩）；**法线精度损失**（写入时压缩到 8 位；利用归一化可只存两分量重建第三分量，见延伸阅读）；透明物体需单独前向 pass；特殊材质需把所有参数塞进 G-buffer。解决“遍历所有光源”的两种常见做法：**tile** 与 **cluster**。
 
 ### 光源瓦片（Light tiles）
-在屏幕空间建网格，为每个 **tile** 记录影响它的光源；着色时根据 fragment 所在 tile 只遍历该 tile 的光源。Figure 7.1 – 点光源在屏幕上的覆盖区域。tile 可在 CPU 或 GPU compute 中构建，数据存为扁平数组；传统做法需 depth prepass 求 min/max Z，可能受深度不连续影响，但结构通常紧凑。
+在屏幕空间建网格，为每个 **tile** 记录影响它的光源；着色时根据 fragment 所在 tile 只遍历该 tile 的光源。
+
+![image-20260303171123177](./image-20260303171123177.png)
+
+Figure 7.1 – 点光源在屏幕上的覆盖区域。tile 可在 CPU 或 GPU compute 中构建，数据存为扁平数组；传统做法需 depth prepass 求 min/max Z，可能受深度不连续影响，但结构通常紧凑。
 
 ### 光源聚类（Light clusters）
 
-**Cluster** 将视锥按 3D 网格划分，光源分配到每个格子，渲染时只遍历 fragment 所属格子的光源。Figure 7.2 – 点光源覆盖的视锥 cluster。光源可存于 3D 纹理或 BVH、八叉树等。构建 cluster 不需 depth prepass，多数实现为每盏灯建 AABB 并投影到 clip 空间，便于 3D 查找且可达到较高精度。下一节概述我们的 G-buffer 实现。
+**Cluster** 将视锥按 3D 网格划分，光源分配到每个格子，渲染时只遍历 fragment 所属格子的光源。
+
+![image-20260303171133459](./image-20260303171133459.png)
+
+Figure 7.2 – 点光源覆盖的视锥 cluster。
+
+光源可存于 3D 纹理或 BVH、八叉树等。构建 cluster 不需 depth prepass，多数实现为每盏灯建 AABB 并投影到 clip 空间，便于 3D 查找且可达到较高精度。下一节概述我们的 G-buffer 实现。
 
 ## 实现 G-buffer
 项目一开始就采用延迟渲染；多 RT 会在后续章节用于 TAA 等。在 Vulkan 中需创建 framebuffer（存 G-buffer 的纹理）与 render pass，帧图（第 4 章）已自动化这一步；我们同时使用 **VK_KHR_dynamic_rendering** 扩展简化 render pass 与 framebuffer 的创建。**说明**：该扩展在 Vulkan 1.3 中已入核，可省略 KHR 后缀。使用该扩展后不必提前创建 render pass 与 framebuffer。创建管线时需填充 **VkPipelineRenderingCreateInfoKHR**（viewMask、colorAttachmentCount、pColorAttachmentFormats、depthAttachmentFormat、stencilAttachmentFormat），并链到 VkGraphicsPipelineCreateInfo 的 pNext；不再填充 renderPass 成员。示例：
+```
 VkPipelineRenderingCreateInfoKHR pipeline_rendering_create_info{
 VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
 pipeline_rendering_create_info.viewMask = 0;
@@ -36,7 +47,9 @@ creation.render_pass.depth_stencil_format;
 pipeline_rendering_create_info.stencilAttachmentFormat
 = VK_FORMAT_UNDEFINED;
 pipeline_info.pNext = &pipeline_rendering_create_info;
+```
 （结构体填好后链到 pipeline 的 pNext。）渲染时用 **vkCmdBeginRenderingKHR** 替代 vkCmdBeginRenderPass。先创建颜色附件数组：
+```
 Array<VkRenderingAttachmentInfoKHR> color_attachments_info;
 color_attachments_info.init( device->allocator,
 framebuffer->num_color_attachments,
@@ -66,7 +79,9 @@ output.color_operations[ a ] ==
 RenderPassOperation::Enum::Clear ? clears[ 0 ]
 : VkClearValue{ };
 }
+```
 深度附件同样填充 VkRenderingAttachmentInfoKHR（若有）：
+```
 VkRenderingAttachmentInfoKHR depth_attachment_info{
 VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
 bool has_depth_attachment = framebuffer->
@@ -89,7 +104,9 @@ output.depth_operation ==
 RenderPassOperation::Enum::Clear ? clears[ 1 ]
 : VkClearValue{ };
 }
+```
 最后填充 VkRenderingInfoKHR（flags、renderArea、colorAttachmentCount、pColorAttachments、pDepthAttachment 等）并调用 vkCmdBeginRenderingKHR；结束时调用 **vkCmdEndRenderingKHR**。G-buffer 有四个颜色 RT 加深度。Fragment 中声明多个 location 输出（与 vkCmdBeginRenderingKHR 中附件顺序一致）；法线为省内存只存两通道，采用**八面体编码**（octahedral encoding），光照 pass 中解码。编码与解码函数示例：
+```
 VkRenderingInfoKHR rendering_info{
 VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
 rendering_info.flags = use_secondary ?
@@ -121,8 +138,10 @@ layout (location = 1) out vec2 normal_out;
 layout (location = 2) out vec4
 occlusion_roughness_metalness_out;
 layout (location = 3) out vec4 emissive_out;
+```
 （写入某 RT 即写入对应 out 变量。）编码：
 （将球面投影到八面体再到 xy 平面；下半球沿对角线折叠。）解码：
+```
 vec3 octahedral_decode(vec2 f) {
 vec3 n = vec3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
 float t = max(-n.z, 0.0);
@@ -130,13 +149,19 @@ n.x += n.x >= 0.0 ? -t : t;
 n.y += n.y >= 0.0 ? -t : t;
 return normalize(n);
 }
-Table 7.1 – G-buffer 内存布局。Figure 7.3 – 自上而下：albedo、法线、occlusion(红)/roughness(绿)/metalness(蓝)。可进一步压缩：不透明物体不需 alpha；也可混合多 RT（如 RGBA8：rgb+normal_1；normal_2+roughness+metalness+occlusion；emissive）或使用 R11G11B10 等格式。下一节介绍我们实现的光照聚类。
+```
+Table 7.1 – G-buffer 内存布局。
+
+![image-20260303171203513](./image-20260303171203513.png)
+
+Figure 7.3 – 自上而下：albedo、法线、occlusion(红)/roughness(绿)/metalness(蓝)。可进一步压缩：不透明物体不需 alpha；也可混合多 RT（如 RGBA8：rgb+normal_1；normal_2+roughness+metalness+occlusion；emissive）或使用 R11G11B10 等格式。下一节介绍我们实现的光照聚类。
 
 ## 实现光照聚类
 实现基于 [Activision 2017 Sig 论文](https://www.activision.com/cdn/research/2017_Sig_Improved_Culling_final.pdf)：将 **XY 平面**与 **Z 范围**分开处理，结合 tile 与 cluster 的优点。步骤：(1) 按相机空间深度对光源排序；(2) 将深度范围划分为等长 bin（也可用对数划分）；(3) 将包围盒落在某 bin 内的光源归入该 bin，只存该 bin 的 min/max 光源索引，每 bin 16 位；(4) 将屏幕分为 tile（我们为 8×8），求覆盖每个 tile 的光源，每 tile 用**位域**表示活跃光源；(5) 着色时根据 fragment 深度读 bin 索引；(6) 在该 bin 的 min～max 范围内遍历，用 xy 取 tile 位域判断光源是否对该 fragment 可见。这样可高效遍历每个 fragment 的活跃光源。
 
 ### CPU 端光源分配
 每帧步骤：(1) 按深度排序：计算每盏灯在相机空间中的中心与沿视线方向的最近/最远点（p_min、p_max），得到 projected_z、projected_z_min、projected_z_max（归一化到 [0,1]，z_far 可设小一些以提高精度）：
+```
 float z_far = 100.0f;
 for ( u32 i = 0; i < k_num_lights; ++i ) {
 Light& light = lights[ i ];
@@ -169,7 +194,9 @@ sorted_light.projected_z_max = ( -
 projected_p_max.z - scene_data.z_near ) / (
 z_far - scene_data.z_near );
 }
+```
 （只对光源索引排序，避免每帧重传光源数组，只更新索引。）(2) 分配 tile：定义 light_tiles_bits 数组与 tile  stride；将光源变换到相机空间，若在相机后方可跳过：
+```
 qsort( sorted_lights.data, k_num_lights, sizeof(
 SortedLight ), sorting_light_fn );
 u32* gpu_light_indices = ( u32* )gpu.map_buffer(
@@ -181,16 +208,20 @@ gpu_light_indices[ i ] = sorted_lights[ i ]
 }
 gpu.unmap_buffer( cb_map );
 }
+```
 This optimization allows us to upload the light array only once, while
 we only need to update the light indices.
 （定义 light_tiles_bits、tiles_entry_count、tile_stride 等。）
+```
 Array<u32> light_tiles_bits;
 light_tiles_bits.init( context.scratch_allocator,
 tiles_entry_count, tiles_entry_count );
 float near_z = scene_data.z_near;
 float tile_size_inv = 1.0f / k_tile_size;
 u32 tile_stride = tile_x_count * k_num_words;
+```
 （将光源位置变换到相机空间，camera_visible 判断是否在相机前方。）
+```
 for ( u32 i = 0; i < k_num_lights; ++i ) {
 const u32 light_index = sorted_lights[ i ]
 .light_index;
@@ -207,7 +238,9 @@ if ( !camera_visible &&
 context.skip_invisible_lights ) {
 continue;
 }
+```
 (3) 将光源包围球的 8 个角点变换到视空间再投影到 clip 空间，得到 NDC 下的 AABB（aabb_min/max），注意 y 取反以匹配屏幕坐标系：
+```
 for ( u32 c = 0; c < 8; ++c ) {
 vec3s corner{ ( c % 2 ) ? 1.f : -1.f, ( c & 2 ) ?
 1.f : -1.f, ( c & 4 ) ? 1.f : -1.f };
@@ -231,7 +264,9 @@ aabb.x = aabb_min.x;
 aabb.z = aabb_max.x;
 aabb.w = -1 * aabb_min.y;
 aabb.y = -1 * aabb_max.y;
+```
 (4) 将 AABB 从 NDC 转到屏幕空间（乘以 0.5 加 0.5 再乘分辨率），得到 min_x/min_y/max_x/max_y；若完全在屏幕外则 continue：
+```
 vec4s aabb_screen{ ( aabb.x * 0.5f + 0.5f ) * (
 gpu.swapchain_width - 1 ),
 ( aabb.y * 0.5f + 0.5f ) * (
@@ -256,9 +291,11 @@ continue;
 if ( max_x < 0.0f || max_y < 0.0f ) {
  continue;
 }
+```
 (5) 对该光源覆盖的所有 tile 设置对应位（first_tile_x/y、last_tile_x/y 由 min/max 除以 tile_size 得到；array_index = y*tile_stride + x，word_index = i/32，bit_index = i%32，light_tiles_bits[array_index+word_index] |= (1<<bit_index)）。最后将 light tiles 与 bin 数据上传 GPU。Table 7.2 – 深度 bin 示例；Table 7.3 – 每 tile 位域示例（每 tile 可占多个 32 位字）。下一节在 GPU 光照中如何使用这些数据。
 
 ### GPU 端光照处理
+```
 min_x = max( min_x, 0.0f );
 min_y = max( min_y, 0.0f );
 max_x = min( max_x, ( float )gpu.swapchain_width );
@@ -279,6 +316,7 @@ light_tiles_bits[ array_index + word_index ] |= (
 1 << bit_index );
 }
 }
+```
 We then upload all the light tiles and bin data to the GPU.
 At the end of this computation, we will have a bin table containing the
 minimum and maximum light ID for each depth slice. The following
@@ -302,6 +340,7 @@ GPU light processing
 (1) 根据 fragment 的相机空间深度计算 linear_d，得到 bin_index；从 bins[bin_index] 解码出 min_light_id 与 max_light_id（低 16 位与高 16 位）。(2) 根据 gl_GlobalInvocationID.xy 与 TILE_SIZE 得到 tile，计算 tile 在 bitfield 数组中的 address。(3) 若 max_light_id==0 表示该 bin 无光源。否则 (4) 从 min_light_id 到 max_light_id 循环，计算 word_id、bit_id，若 (tiles[address+word_id] & (1<<bit_id)) 非零则该光源覆盖该 tile，(5) 用 light_indices[light_id] 取全局光源索引，调用 calculate_point_light_contribution 累加。代码中还有使用 subgroup 指令的优化版本与注释。该技术既可用于延迟也可用于前向渲染。下一章将补上目前缺失的**阴影**。
 
 ## 本章小结
+```
 vec4 pos_camera_space = world_to_camera * vec4(
 world_position, 1.0 );
 float z_light_far = 100.0f;
@@ -311,6 +350,7 @@ int bin_index = int( linear_d / BIN_WIDTH );
 uint bin_value = bins[ bin_index ];
 uint min_light_id = bin_value & 0xFFFF;
 uint max_light_id = ( bin_value >> 16 ) & 0xFFFF;
+```
 （position、tile、stride、address 计算；min/max_light_id 减 1 是因存储时从 1 开始；循环内 word_id、bit_id、tiles 位测试、light_indices、累加光照贡献。详见代码与 subgroup 优化版。）本章实现了光照聚类：先对比了前向与延迟渲染的优缺点及 tile/cluster 两种分组方式；再概述 G-buffer 的 RT 配置、**VK_KHR_dynamic_rendering** 的用法、多 RT 写入与法线八面体编解码，并提到进一步压缩建议；最后详述我们采用的聚类算法：按深度排序与 bin、按 tile 的位域、以及在光照 shader 中如何用 bin 与 tile 减少每 fragment 需计算的光源数。光照阶段优化对保持帧率至关重要，可多尝试不同方案。加入大量光源后场景仍缺**阴影**，下一章将专门讲解。
 
 ## 延伸阅读
