@@ -98,11 +98,22 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 8–9 页
+## 第 8 页 · 光散射 (Light scattering)
 
-（本页为散射与参与介质相关图示或公式，见下图。）
+当介质参与光传输时，每个足够大、能影响光子/光线的粒子都会参与光传输方程。例如尘埃或水粒子会使部分光线/光子弹向随机方向：一部分光**进入**视线路径（**内散射，In-scattering**），另一部分光被弹**出**视线路径、变暗（**外散射，Out-scattering**）。  
+图中：光源在右侧、视锥/相机在左侧，中央水平灰箭为主光路；灰色箭头从光源折向主光路表示内散射，青色箭头从主光路向下/向外表示外散射；另有前向散射示意。  
+现实中每个粒子都会按相位函数同时产生外散射与内散射，多条射线多次进出光路，非常复杂；实时渲染中通常**忽略多重散射 (multiple scattering)**。
 
 ![第8页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0008.jpg)
+
+---
+
+## 第 9 页 · 比尔–朗伯定律 (Beer-Lambert Law)
+
+用于光散射计算的一条重要物理定律是 **Beer-Lambert 定律**，它描述**入射光的消光 (extinction)**，即光的**外散射**。该定律定义**透射率 (transmittance)**：从给定方向入射、经介质传输后仍保留的光的比例。  
+公式：**T(A → B) = e^(−∫_A^B βe(x) dx)**  
+其中 **βe** 为**消光系数 (extinction coefficient)**，等于散射系数与吸收系数之和。由 Beer-Lambert 可知，光在介质中的消光是光所经距离的**指数函数**。  
+图中：左侧为光源，光线穿过中间含粒子的矩形介质，部分被散射出（小箭头），右侧为透射后的光（青色箭头与绿块）。
 
 ![第9页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0009.jpg)
 
@@ -118,9 +129,14 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 11 页
+## 第 11 页 · 相位函数 (Phase functions)
 
-（本页为相位函数或散射公式相关，见下图。）
+**相位函数 (phase function)** 描述光在各个方向上被散射多少，是**入射光方向与出射方向夹角**的函数；具有**能量守恒**性质：对所有方向的积分等于 1（若内含吸收信息则可小于 1）。  
+图中：左侧为简化示意——水平灰箭为入射光，从中心粒子向上偏左的绿箭为散射光 **T(α)**，角 **α** 为散射角；下标「Light scattered in direction T(α)」。  
+**能量守恒**公式：**∫₀^2π ∫₀^π P(θ) dθ dφ = 1**  
+右侧为**极坐标图**示例：某复杂相位函数（如云层相位函数）随散射角变化的曲线，可见前向瓣等不规则瓣状。  
+来源：Bouthors et al., «Real-time realistic illumination and shading of stratiform clouds»。  
+说明：相位函数可以非常复杂，可由多种模型或真实采集数据描述。
 
 ![第11页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0011.jpg)
 
@@ -141,11 +157,25 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 13–14 页
+## 第 13 页 · 散射各向异性 (Scattering anisotropy)
 
-（本页为相位函数或散射模型图示，见下图。）
+三张并排图展示不同**各向异性参数 g** 下体积雾效果（室内、光线从矩形窗射入）：  
+- **g = 0**（左）：各向同性散射，光线均匀弥散，无明显光束，窗户不突出。  
+- **g = 0.9**（中）：强前向散射，窗光形成非常清晰、明亮的光柱（丁达尔效应），其余区域较暗。  
+- **g = 0.3**（右）：介于二者之间，有可见光束但不如 g=0.9 强烈，雾气仍有一定弥散。  
+说明 **g**（通常 ∈ [−1, 1]）对体积雾中光的传播与视觉影响很大：g 越接近 1，前向散射越强，光束越明显。
 
 ![第13页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0013.jpg)
+
+---
+
+## 第 14 页 · 游戏中的近似（续）(Approximations in games)
+
+**解析解 (Analytical solutions)**  
+自 90 年代与早期 OpenGL 起，第一种近似是解析解；早期多为简单**线性深度雾**，上一代主机上的先进做法是**基于指数距离的解析雾**。C. Wenzel 在 «Real-time atmospheric effects in games revisited» 中有清晰描述；基于真实散射现象并给出解析解，但**无法处理变化的介质密度与阴影**。配图：晴朗天空下的远山，大气透视/雾效。来源：C. Wenzel。  
+
+**基于公告板/粒子 (Billboard / particle based)**  
+第二种是美术制作的**面向相机的公告板或粒子**（与相机相交时淡出），易用、对程序员依赖少；缺点：依赖美术、设置繁琐、不够稳健（如昼夜或视角变化时可能「不对」）、不够动态（对光照与阴影变化响应不足）。配图：密林中的 God rays 与体积雾。
 
 ![第14页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0014.jpg)
 
@@ -164,11 +194,25 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 16–17 页
+## 第 16 页 · 为何不用 2D 光线步进？(Why not 2D raymarching?)
 
-（本页为现有方案或 raymarching 示意图，见下图。）
+**2D 光线步进的局限：**  
+- 多数**不基于物理**，多为近距离「体积阴影/光束」，用艺术家指定的混合模式。  
+- **循环**执行，对 GPU 并行性利用差：样本顺序计算；在 AMD GCN 等架构上会浪费大量线程波。  
+- **极线采样**等优化在诸多限制下工作：不支持**变化的介质密度**、不支持**多光源**（每个光源需不同极线方案）。  
+- 与**前向渲染**不兼容：单层效果、只存一个深度，无法正确处理透明物体或粒子。  
+- **低分辨率**带来欠采样、锯齿与**边缘伪影**。  
+
+因此需要更统一的体积方案（如 3D 纹理 + compute）。
 
 ![第16页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0016.jpg)
+
+---
+
+## 第 17 页 · 灵感来源 (Inspiration)
+
+**Kaplanyan, «Light Propagation Volumes», Siggraph 2009**  
+在对多种「经典」技术做原型后，最大灵感来自 Anton Kaplanyan 在 Siggraph 2009 的**光传播体 (LPV)** 全局光照技术。该技术总结与未来工作中提到：用**发光体积纹理**（注入并传播光以模拟 GI 的结果）来**计算参与介质中的光传输**；好处是**只需一次 raymarching、与光源数量无关**，参与介质中的光传输可被统一。若再加上简单**阴影项**，就能以阴影计算的成本得到光轴/God rays。本页配图为拱形室内、地面红/绿/蓝光源在体积雾中形成彩色光束。
 
 ![第17页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0017.jpg)
 
@@ -182,9 +226,9 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 19 页
+## 第 19 页 · 视频截图（体积雾效果）
 
-（本页为算法或管线概览，见下图。）
+游戏内截图：第三人称、角色背对镜头，站在雨雾弥漫的丛林中；中远景有厚重体积雾，雨丝与棕榈剪影，界面含血条/耐力、小地图、手柄按键提示（X/B/A）等。下方标注「VIDEO」，表示来自视频演示。用于展示体积雾在实际场景中的表现。
 
 ![第19页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0019.jpg)
 
@@ -198,9 +242,9 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 21 页
+## 第 21 页 · 算法概览（章节页）(Algorithm overview)
 
-（本页为体积雾管线或数据流，见下图。）
+本页为「算法概览」部分的**章节标题页**，中央标题 "Algorithm overview"，表示接下来将展开算法的详细说明。
 
 ![第21页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0021.jpg)
 
@@ -217,11 +261,28 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 23–24 页
+## 第 23 页 · 算法概览：解耦散射步骤 (Algorithm overview)
 
-（本页为算法步骤或体积布局示意，见下图。）
+**解耦典型的散射步骤 (Decouple typical scattering steps)**：  
+1. 参与介质密度估计 (Participating media density estimation)  
+2. 计算内散射光照 (Calculating in-scattered lighting)  
+3. 光线步进 (Ray-marching)  
+4. 应用效果 (Applying effect)  
+
+算法的关键思想是将 raymarching 的典型步骤**解耦并并行化**，分别启动；从而获得并行性，并可**独立交换与调整**算法的每个环节。
 
 ![第23页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0023.jpg)
+
+---
+
+## 第 24 页 · 算法概览：多 Pass 流程图 (Algorithm overview)
+
+流程图：**密度估计 (Density estimation)** 与 **光照计算 (Lighting calculation)** 可合并或串行/并行执行，二者分别写入 **3D 纹理**；两路 3D 纹理输入到 **Raymarching**，再输出到 **3D 纹理**；最后 **Apply in forward / deferred** 得到 **Shaded objects**。  
+说明：  
+1. 首先对每个体积单元做光照与阴影计算。  
+2. 并行或串行地估计并驱动参与介质密度。  
+3. 用体积纹理中存储的信息做 2D raymarching，结果存于体积切片。  
+4. 用像素着色器将结果应用到前向或延迟着色的物体上。
 
 ![第24页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0024.jpg)
 
@@ -241,15 +302,37 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 26–29 页
+## 第 26 页 · 体积纹理分辨率够吗？(Is this volumetric texture resolution enough?)
 
-（本页为体积格式、深度分布或光照注入相关，见下图。）
+场景截图：热带/遗迹场景，青蓝调体积雾、右侧火炬暖光在雾中形成清晰光束，无明显块状或阶梯伪影。  
+下方问题：「**Is this volumetric texture resolution enough?**」（这个体积纹理分辨率足够吗？）——从视觉上说明所选分辨率在该类雾效下是可接受的。
 
 ![第26页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0026.jpg)
 
+---
+
+## 第 27 页 · 体素分辨率——太低了吗？(Volume resolution - too low?)
+
+要点：我们为**整条视线**存储信息，并沿深度做 **tex3D 过滤**；每个 1080p 像素都能获得**正确信息**，**没有边缘伪影**；缺点是结果偏柔和。  
+说明：体素纹理分辨率看起来很低但足够，因为 (1) 沿光线每个深度存的是低频信息；(2) 应用效果时对体素做**四线性过滤**，看不到单纹素；(3) 每个像素在其精确深度收到正确信息；(4) 透视校正与体素形状保证信息正确分布；(5) 深度不连续处不会出现边缘伪影。效果偏柔和符合艺术方向，也与真实大气中多重散射的柔化一致。另一优势：不依赖场景深度，可在阴影贴图就绪后与场景渲染**并行**（如 AMD 异步计算、控制台 API 或 Mantle）。
+
 ![第27页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0027.jpg)
 
+---
+
+## 第 28 页 · 2D 方案的边缘伪影 (2D Approach – edge artifacts)
+
+图：X–Z 截面中两条平滑轮廓（青线）与**低分辨率采样**得到的阶梯状近似（灰块）对比；下方为相机/观察者图标。  
+在做常规 2D 低分辨率渲染时，主要问题出在**边缘不连续**处：低分辨率后处理必须从多个可能深度中**选一个**，导致部分最终着色片段得到错误信息（无论是插值还是从邻域选取，如 bilateral upsampling）。即 2D 方法在深度突变处易产生伪影。
+
 ![第28页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0028.jpg)
+
+---
+
+## 第 29 页 · 3D 纹理——正确边缘 (3D Texture - proper edges)
+
+图：3D 网格中一大球与一扁椭球，两个绿色棱柱表示采样体，中心红点为采样点；下方绿色箭头指向输出块。  
+用 **3D 纹理与 3D 插值**则没有上述问题：每个全分辨率片段及其深度都得到**分段线性插值**的计算结果；虽仍是低分辨率、可能「锯齿」，但**没有边缘不连续伪影**。
 
 ![第29页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0029.jpg)
 
@@ -265,15 +348,38 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 31–34 页
+## 第 31 页 · 走样问题：阴影级联 (Aliasing problem)
 
-（本页为时间滤波或实现细节，见下图。）
+**4 个 shadow cascade，1536×1536**（或依平台 1k×1k）：细节过多，阴影信息**高于体积的奈奎斯特频率**，导致大量走样与闪烁，需要对阴影施加**低通滤波**；朴素的 32-tap PCF 性能不可接受。  
+算法第一步是为雾的太阳散射阴影**准备阴影图**。常规级联阴影分辨率很高、信息密集，对平滑近似的体积雾而言过多（尤其近处、前两级 cascade 集中在几米内）；需要更低分辨率以减轻植被等运动带来的闪烁/走样。早期用大核 PCF 的实现性能差且仍有闪烁与走样。
 
 ![第31页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0031.jpg)
 
+---
+
+## 第 32 页 · 指数阴影贴图 (Exponential shadow maps)
+
+**ESM 性质**：不需做深度比较即可做阴影测试；估计**阴影概率**；阴影测试计算高效；**可降采样**（如 256×256 R32F 级联）。  
+图中为阴影函数 **e^(−k(d−z))** 在 (d−z) 为横轴、不同 k（如 10、20、80）下的曲线；阴影测试 > 1.0 无效、域外标注。来源：Annen et al., «Exponential Shadow Maps»。  
+ESM 可对估计的阴影概率做滤波，从而对阴影函数降采样；阴影测试的实现简单且高效，附赠幻灯片中有简单代码片段。
+
 ![第32页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0032.jpg)
 
+---
+
+## 第 33 页 · 指数阴影贴图（续）(Exponential shadow maps)
+
+**可过滤**（可分离模糊）；缺点为**阴影泄漏 (shadow leaking)**，在参与介质中可忽略。代码片段见附赠幻灯片。  
+实现：将级联阴影图下采样四次（目标 R32F 1024×256）；下采样时计算指数阴影函数（参见 Exponential Shadow Mapping，即用指数函数替代切比雪夫不等式的方差阴影图扩展）；此 pass 中再做**可分离盒式滤波**（两步）使阴影更柔、去除走样。ESM 的阴影泄漏在常规渲染中不实用，但在参与介质中不明显。
+
 ![第33页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0033.jpg)
+
+---
+
+## 第 34 页 · 聚光灯抗锯齿 (Spotlights antialiasing)
+
+图：聚光灯**锥体**（灰色大三角 + 白色半透明内锥）与**像素网格**相交；锥角标为 α。网格中与锥边相交的像素（如绿色块）被部分照亮，产生锯齿。  
+说明当聚光硬边落在像素之间时，需要抗锯齿以平滑聚光灯边缘造成的锯齿。
 
 ![第34页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0034.jpg)
 
@@ -294,15 +400,38 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 36–39 页
+## 第 36 页 · 算法细节：管线图 (Algorithm details)
 
-（本页为密度估计、光照注入或散射步骤，见下图。）
+流程图：Shadow cascades → **CS: Shadowmap downsample & blur** → ESM；随后 **CS: Density estimation and volume lighting** 产出 **Density & in-scattering**（3D 块）；再 **CS: Solving scattering equation** → **Accumulated scattering**；最后 **Depth buffer**、**Color buffer** 与 Accumulated scattering 进入 **PS: Apply fog** → **Final color buffer**。  
+说明：下采样后的阴影信息就绪后，进行参与介质光照计算。
 
 ![第36页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0036.jpg)
 
+---
+
+## 第 37 页 · 密度估计与体积光照 (Density estimation and volume lighting)
+
+**参与介质密度估计**：程序化 Perlin 噪声由风驱动动画、垂直衰减、散射系数存于体积纹理 A 通道。  
+**光照内散射**：主光用 ESM 阴影、常数环境项、对点光源循环；结果存于体积纹理 RGB。  
+密度与光照合并计算以略减带宽、分辨率一致；也可拆开完全解耦。密度为单八度 Perlin 噪声 + 风动画；垂直密度按指数衰减（重粒子如蒸汽倾向于近地面）。主光（日/月）、环境项与艺术家标记的、与视锥相交的动态点光累加，主光用 ESM；光照经密度调制后存 RGB。
+
 ![第37页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0037.jpg)
 
+---
+
+## 第 38 页 · 密度估计与体积光照（续）(Density estimation and volume lighting)
+
+**AC4 中的光照内散射相位函数**：非基于物理、艺术驱动——**两种颜色**（太阳方向、反太阳方向）；图中圆盘示意太阳方向颜色（亮黄/橙）与反方向颜色（浅白/黄）。  
+AC4 未用基于物理的相位函数，光照颜色渐变（沿太阳方向）完全由美术控制；形状除这两方向外为完全各向同性。任何相位函数都可在此 pass 中应用以获得更物理的结果（后文述）。
+
 ![第38页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0038.jpg)
+
+---
+
+## 第 39 页 · 算法细节：散射方程 (Algorithm details)
+
+同第 35/36 页的算法细节流程图，本页突出**第三步**：**CS: Solving scattering equation**（亮绿框）。  
+说明：第三步是通过在雾体积中**线性步进 (linearly marching)** 并做数值积分来**求解散射方程**。
 
 ![第39页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0039.jpg)
 
@@ -322,61 +451,220 @@ SIGGRAPH 2014 官方封面。主视觉为金属质感双环 logo，标语「NATU
 
 ---
 
-## 第 41–67 页（幻灯片图）
+## 第 41 页 · 求解散射方程（实现）(Solving scattering equation)
 
-以下各页为实现细节、性能、结果对比、Beyond AC4 及总结等，保留原图供查阅。
+**方法**：2D compute shader；暴力数值积分；沿深度切片步进并累积；使用 **UAV 写入**。  
+Compute shader 在每一步累积内散射光与雾密度（数值解），得到体积纹理：每个纹素存有从相机到该 3D 点的内散射光量以及累积的参与介质密度（描述外散射量）。该数据可在前向（绘制物体时直接应用）或延迟（全屏 quad pass）方式下应用。
 
 ![第41页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0041.jpg)
 
+---
+
+## 第 42 页
+
+（本页为散射方程或应用雾效相关图示/要点，见下图。）
+
 ![第42页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0042.jpg)
+
+---
+
+## 第 43 页
+
+（本页为实现细节或应用雾效图示，见下图。）
 
 ![第43页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0043.jpg)
 
+---
+
+## 第 44 页
+
+（本页为前向/延迟应用或性能相关，见下图。）
+
 ![第44页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0044.jpg)
+
+---
+
+## 第 45 页
+
+（本页为管线或结果相关图示，见下图。）
 
 ![第45页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0045.jpg)
 
+---
+
+## 第 46 页
+
+（本页为效果对比或参数说明，见下图。）
+
 ![第46页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0046.jpg)
+
+---
+
+## 第 47 页
+
+（本页为性能或优化要点，见下图。）
 
 ![第47页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0047.jpg)
 
+---
+
+## 第 48 页
+
+（本页为结果或 Beyond AC4 相关，见下图。）
+
 ![第48页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0048.jpg)
+
+---
+
+## 第 49 页
+
+（本页为未来工作或扩展思路，见下图。）
 
 ![第49页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0049.jpg)
 
+---
+
+## 第 50 页 · 延迟式光照注入 (Deferred-like light injection)
+
+图：相机望向体积网格，两个黄色光源分别影响网格中不同单元格（黄框标出）。  
+光照也可**注入体积**，作为前向光照的替代：计算光源的**体积包围盒**，仅对与之相交的体素做光照；可用 DX11/次世代主机的 **indirect dispatch** 实现。该优化对高 VGPR 消耗的复杂光源（如面光源）很有用。
+
 ![第50页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0050.jpg)
+
+---
+
+## 第 51 页
+
+（本页为优化或扩展方案图示，见下图。）
 
 ![第51页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0051.jpg)
 
+---
+
+## 第 52 页
+
+（本页为结果或参考图示，见下图。）
+
 ![第52页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0052.jpg)
+
+---
+
+## 第 53 页
+
+（本页为实现或性能图示，见下图。）
 
 ![第53页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0053.jpg)
 
+---
+
+## 第 54 页
+
+（本页为效果或参数图示，见下图。）
+
 ![第54页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0054.jpg)
+
+---
+
+## 第 55 页
+
+（本页为 Beyond AC4 或未来工作，见下图。）
 
 ![第55页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0055.jpg)
 
+---
+
+## 第 56 页
+
+（本页为总结或致谢相关，见下图。）
+
 ![第56页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0056.jpg)
+
+---
+
+## 第 57 页
+
+（本页为参考或附录图示，见下图。）
 
 ![第57页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0057.jpg)
 
+---
+
+## 第 58 页
+
+（本页为附录或扩展内容，见下图。）
+
 ![第58页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0058.jpg)
+
+---
+
+## 第 59 页
+
+（本页为附赠幻灯片或代码片段，见下图。）
 
 ![第59页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0059.jpg)
 
+---
+
+## 第 60 页
+
+（本页为附赠或参考图示，见下图。）
+
 ![第60页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0060.jpg)
+
+---
+
+## 第 61 页
+
+（本页为附录图示，见下图。）
 
 ![第61页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0061.jpg)
 
+---
+
+## 第 62 页
+
+（本页为参考或致谢，见下图。）
+
 ![第62页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0062.jpg)
+
+---
+
+## 第 63 页
+
+（本页为附录或扩展，见下图。）
 
 ![第63页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0063.jpg)
 
+---
+
+## 第 64 页
+
+（本页为参考或总结，见下图。）
+
 ![第64页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0064.jpg)
+
+---
+
+## 第 65 页
+
+（本页为附录图示，见下图。）
 
 ![第65页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0065.jpg)
 
+---
+
+## 第 66 页
+
+（本页为参考或致谢，见下图。）
+
 ![第66页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0066.jpg)
+
+---
+
+## 第 67 页 · 可控密度 (Controllable density)
+
+**密度可由美术主导**；**关卡上的密度图**（如沼泽、尘封建筑）；**粒子注入**（如烟雾云）；**体积形状注入**；影视/CGI 中已有类似做法——见 Wrenninge et al., Siggraph 2010。  
+本方案中密度为简单动画 Perlin 噪声，但也可由美术任意控制：可在关卡上绘制、用于充满雾或散射粒子的区域（沼泽、尘埃建筑）；也可通过粒子系统或解析体积形状/力场动态注入。参见 Wrenninge et al. Siggraph 2010 了解影视工业中的早期做法。
 
 ![第67页](./ilovepdf_pages-to-jpg/bwronski_volumetric_fog_siggraph2014_page-0067.jpg)
 
