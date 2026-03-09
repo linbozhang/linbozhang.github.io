@@ -17,6 +17,8 @@
     * [体积雾（视锥 3D 纹理）](engine/unity/volumetric/fog.md)
     * [Bart Wronski 体积雾（Siggraph 2014 + 博客）](engine/unity/volumetric/wronski-volumetric-fog.md)
     * [Bart Wronski 体积雾 Siggraph 2014 幻灯片文字版](engine/unity/volumetric/bwronski_volumetric_fog_siggraph2014.md)
+    * [Revision 2013 实时体积渲染课程笔记](engine/unity/volumetric/Revision_2013_Realtime_Volumetric_Rendering_Course_Notes.md)
+    * [SIGGRAPH 2016 id Tech 6：细节决定成败](engine/unity/volumetric/Siggraph2016_idTech6.md)
     * [编辑器工具](engine/unity/editor-tools/README.md)
   * [Unreal Engine](engine/unreal/README.md)
   * [Bevy](engine/bevy/README.md)
