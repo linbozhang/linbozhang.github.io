@@ -19,6 +19,8 @@
     * [Bart Wronski 体积雾 Siggraph 2014 幻灯片文字版](engine/unity/volumetric/bwronski_volumetric_fog_siggraph2014.md)
     * [Revision 2013 实时体积渲染课程笔记](engine/unity/volumetric/Revision_2013_Realtime_Volumetric_Rendering_Course_Notes.md)
     * [SIGGRAPH 2016 id Tech 6：细节决定成败](engine/unity/volumetric/Siggraph2016_idTech6.md)
+    * [Rendering Inside（《Inside》渲染技术）](engine/unity/volumetric/rendering_inside.md)
+    * [游戏中的条带问题 (Banding in Games)](engine/unity/volumetric/banding_in_games.md)
     * [编辑器工具](engine/unity/editor-tools/README.md)
   * [Unreal Engine](engine/unreal/README.md)
   * [Bevy](engine/bevy/README.md)
